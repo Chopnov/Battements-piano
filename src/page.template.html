@@ -1,0 +1,254 @@
+<title>Battements Piano</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+  /* Mise en page : une colonne étroite, de type outil de poche pour l'accordeur. */
+  :root {
+    --bg: #f3f4f6; --surface: #ffffff; --surface2: #e6e9ef; --line: #d5d9e1;
+    --fg: #181b20; --muted: #596273; --accent: #2a64d6; --warn: #a8690d; --ok: #1d9b60;
+    --tint: rgba(42,100,214,.08); --tint2: rgba(42,100,214,.18);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14161a; --surface: #1d2026; --surface2: #2b313b; --line: #333a45;
+      --fg: #eceff4; --muted: #8b93a1; --accent: #6fa0ff; --warn: #f5c542; --ok: #3ddc84;
+      --tint: rgba(111,160,255,.08); --tint2: rgba(111,160,255,.22);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14161a; --surface: #1d2026; --surface2: #2b313b; --line: #333a45;
+    --fg: #eceff4; --muted: #8b93a1; --accent: #6fa0ff; --warn: #f5c542; --ok: #3ddc84;
+    --tint: rgba(111,160,255,.08); --tint2: rgba(111,160,255,.22);
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { background: var(--bg); color: var(--fg); font-size: 16px;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding-block: 14px 0;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  main { max-width: 560px; margin: 0 auto; padding-bottom: 130px; }
+  header { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  h1 { font-size: 1.15rem; margin: 0; font-weight: 650; }
+  .reglages { display: flex; gap: 12px; font-size: .85rem; color: var(--muted); }
+  .reglages input { width: 62px; background: var(--surface); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px; font-size: 1rem; text-align: center; }
+  small { color: var(--muted); margin-left: 2px; }
+  .mode { margin: 12px 0 4px; font-size: .85rem; color: var(--muted); }
+  .mode select { margin-left: 6px; max-width: 100%; }
+  select { background: var(--surface); color: var(--fg); border: 1px solid var(--line); border-radius: 10px; padding: 9px; font-size: 1rem; }
+  .ligne { display: flex; gap: 8px; margin: 10px 0; }
+  .ligne select { flex: 1; min-width: 0; }
+
+  .onglets { display: flex; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 4px; margin: 12px 0; }
+  .onglets button { flex: 1; background: transparent; border: 0; color: var(--muted); padding: 10px 4px; border-radius: 9px; font: inherit; font-size: .85rem; font-weight: 600; }
+  .onglets button.actif { background: var(--surface2); color: var(--fg); }
+
+  .carte { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    background: var(--surface); border-radius: 14px; padding: 12px 14px; margin-bottom: 8px; cursor: pointer; border: 1px solid var(--line); }
+  .carte > div { min-width: 0; }
+  .carte.joue { border-color: var(--accent); }
+  .carte .nom { font-weight: 600; }
+  .carte .sous { color: var(--muted); font-size: .82rem; margin-top: 3px; line-height: 1.35; }
+  .carte .val { text-align: right; white-space: nowrap; }
+  .hz { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .hz small { font-size: .75rem; font-weight: 400; }
+  .sens { font-size: .78rem; color: var(--muted); }
+  .sens.large { color: var(--warn); } .sens.etroit { color: var(--accent); }
+
+  .tab-scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th { text-align: left; color: var(--muted); font-size: .78rem; font-weight: 500; padding: 6px 8px; }
+  td { padding: 10px 8px; border-top: 1px solid var(--line); }
+  tr.ligne-t { cursor: pointer; }
+  tr.tempe td { background: var(--tint); }
+  tr.joue td { background: var(--tint2); }
+  td.num { text-align: right; font-weight: 600; }
+
+  .aide { color: var(--muted); font-size: .82rem; line-height: 1.4; margin: 8px 0; }
+  .aide.bas { margin-top: 20px; }
+
+  #barre { position: fixed; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 12px;
+    background: var(--surface); border-top: 1px solid var(--line);
+    padding: 12px max(16px, env(safe-area-inset-right, 0px)) calc(12px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); }
+  .pouls { width: 26px; height: 26px; border-radius: 50%; background: var(--ok); flex: none; }
+  .barre-texte { flex: 1; font-size: .95rem; min-width: 0; }
+  .barre-texte b { font-variant-numeric: tabular-nums; }
+  #btnStop { background: var(--surface2); color: var(--fg); border: 0; border-radius: 10px; padding: 10px 18px; font: inherit; font-weight: 600; }
+  .quiz-hz { font-size: 3rem; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; margin: 16px 0 8px; }
+  .quiz-grille { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 14px 0; }
+  .rep { background: var(--surface); color: var(--fg); border: 1px solid var(--line); border-radius: 12px; padding: 12px 4px; font: inherit; font-weight: 600; }
+  .rep.bon { border-color: var(--ok); background: var(--tint); }
+  .rep.mauvais { border-color: var(--warn); }
+  .quiz-retour { min-height: 3.4em; line-height: 1.4; font-size: .95rem; }
+  .btn { background: var(--surface2); color: var(--fg); border: 0; border-radius: 10px; padding: 11px 18px; font: inherit; font-weight: 600; }
+  .btn.princ { background: var(--accent); color: var(--bg); width: 100%; margin-top: 4px; }
+  .quiz-opt { display: flex; align-items: center; gap: 8px; }
+  .quiz-detail { font-weight: 600; margin: 4px 0 10px; line-height: 1.4; }
+  .btn:disabled { opacity: .5; }
+  .tap { display: block; width: 100%; min-height: 110px; margin: 12px 0; border-radius: 16px; border: 2px solid var(--accent);
+    background: var(--tint); color: var(--fg); font: inherit; font-size: 1.3rem; font-weight: 700; touch-action: manipulation; }
+  .tap:disabled { opacity: .4; }
+  button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .res-vert { color: var(--ok); } .res-orange { color: var(--warn); } .res-rouge { color: #d64545; }
+</style>
+
+<main>
+  <header>
+    <h1>Battements</h1>
+    <div class="reglages">
+      <label>La4 <input id="la4" type="number" min="410" max="470" step="0.5" value="440"></label>
+      <label>B <input id="inh" type="number" min="0" max="30" step="0.5" value="0"><small>×10⁻⁴</small></label>
+    </div>
+  </header>
+
+  <div class="mode">
+    <label>Son
+      <select id="mode">
+        <option value="reel" selected>Piano enregistré (Yamaha C5)</option>
+        <option value="notes">Piano calculé (modèle)</option>
+        <option value="partiels">Seuls les 2 partiels qui battent</option>
+      </select>
+    </label>
+  </div>
+
+  <nav class="onglets">
+    <button id="tabDepuis" class="actif">Intervalles</button>
+    <button id="tabTempe">Tempérament</button>
+    <button id="tabTest">Test</button>
+    <button id="tabCompte">Compter</button>
+    <button id="tabEcoute">Écoute</button>
+  </nav>
+
+  <section id="vueDepuis">
+    <div class="ligne">
+      <select id="selNote" aria-label="Note grave de la partition"></select>
+    </div>
+    <div id="liste"></div>
+  </section>
+
+  <section id="vueTempe" hidden>
+    <div class="ligne"><select id="selIv" aria-label="Intervalle"></select></div>
+    <div id="infoIv" class="aide"></div>
+    <div id="tableau" class="tab-scroll"></div>
+  </section>
+
+  <section id="vueTest" hidden>
+    <div class="ligne"><select id="exo" aria-label="Exercice">
+      <option value="tierce">Quelle tierce bat à cette vitesse ?</option>
+      <option value="compare">B bat-il plus vite ou plus lent que A ?</option>
+      <option value="cents">Note aiguë trop haute ou trop basse ?</option>
+      <option value="octave">Octave basse : tierce mineure = sixte majeure ?</option>
+      <option value="regle">Règle toi-même la vitesse (tierces, quarte, sixte mineure)</option>
+    </select></div>
+
+    <div id="exoTierce">
+      <p class="aide">Quelle tierce majeure de la partition bat à cette vitesse ?</p>
+      <div id="quizHz" class="quiz-hz">? Hz</div>
+      <div class="ligne"><button id="quizEcoute" class="btn">Réécouter</button></div>
+      <div id="quizRep" class="quiz-grille"></div>
+      <div id="quizRetour" class="quiz-retour" aria-live="polite"></div>
+      <button id="quizSuite" class="btn princ" hidden>Question suivante</button>
+      <label class="aide quiz-opt"><input type="checkbox" id="quizVitesse" checked> Afficher la vitesse (décocher pour écouter seulement)</label>
+      <div id="quizScore" class="aide"></div>
+    </div>
+
+    <div id="exoDeux" hidden>
+      <div class="ligne">
+        <select id="exoSon" aria-label="Son">
+          <option value="piano">Piano (selon le réglage « Son »)</option>
+          <option value="neutre">Battement neutre</option>
+        </select>
+        <select id="exoNiveau" aria-label="Niveau">
+          <option value="facile">Facile</option>
+          <option value="moyen" selected>Moyen</option>
+          <option value="difficile">Difficile</option>
+        </select>
+      </div>
+      <div class="ligne" id="exoFaibleLigne" hidden>
+        <select id="exoFaible" aria-label="Partiel affaibli">
+          <option value="" selected>Aucun partiel affaibli</option>
+          <option value="hasard">Partiel affaibli au hasard</option>
+          <option value="y5">5e partiel de la note du milieu</option>
+          <option value="x6">6e partiel de la note grave</option>
+          <option value="t3">3e partiel de la note haute</option>
+        </select>
+        <select id="exoAtt" aria-label="Affaiblissement">
+          <option value="hasard" selected>Niveau au hasard</option>
+          <option value="10">−10 dB</option>
+          <option value="20">−20 dB</option>
+          <option value="30">−30 dB</option>
+          <option value="50">Absent</option>
+        </select>
+      </div>
+      <p id="cmpQuestion" class="aide"></p>
+      <p id="cmpDetail" class="quiz-detail"></p>
+      <div class="ligne"><button id="cmpEcoute" class="btn">A puis B</button><button id="cmpA" class="btn">A seul</button><button id="cmpB" class="btn">B seul</button></div>
+      <div id="cmpRep" class="quiz-grille">
+        <button class="rep" data-c="plus">B plus rapide</button>
+        <button id="cmpPareil" class="rep" data-c="pareil">Pareil</button>
+        <button class="rep" data-c="moins">B plus lent</button>
+      </div>
+      <div id="cmpRetour" class="quiz-retour" aria-live="polite"></div>
+      <button id="cmpSuite" class="btn princ" hidden>Question suivante</button>
+      <div id="cmpScore" class="aide"></div>
+    </div>
+
+    <div id="exoRegle" hidden>
+      <p id="regleQ" class="aide"></p>
+      <input id="regleCur" type="range" min="0" max="1000" step="1" value="500" style="width:100%" aria-label="Vitesse de battement">
+      <div class="ligne"><button id="regleEcoute" class="btn">Écouter ma vitesse</button><button id="regleValide" class="btn princ">Valider</button></div>
+      <div id="regleRetour" class="quiz-retour" aria-live="polite"></div>
+      <button id="regleSuite" class="btn princ" hidden>Autre tierce</button>
+      <div id="regleScore" class="aide"></div>
+      <p class="aide">Vert : écart ≤ 8 %. Orange : ≤ 20 %. Rouge : au-delà. L'échelle du curseur change à chaque question et aucune valeur n'est affichée : seul ton oreille compte. Le battement est neutre (pas de note).</p>
+    </div>
+  </section>
+
+  <section id="vueEcoute" hidden>
+    <p class="aide">Joue l'intervalle (une corde par note) : l'appli mesure la vitesse de battement réelle au micro et la compare à ta cible.</p>
+    <div class="ligne">
+      <select id="micNote" aria-label="Note grave"></select>
+      <select id="micIv" aria-label="Intervalle"></select>
+    </div>
+    <div class="ligne"><label class="aide">Cible (Hz) <input id="micCible" type="number" min="0.1" max="25" step="0.1" style="width:5em"></label>
+      <button id="micCibleAuto" class="btn">Valeur du C5</button></div>
+    <div id="micHz" class="quiz-hz">— Hz</div>
+    <div id="micEtat" class="quiz-retour" aria-live="polite">Appuie sur Démarrer.</div>
+    <div class="ligne"><button id="micStart" class="btn princ">Démarrer l'écoute</button></div>
+    <div class="ligne"><button id="micSeul1" class="btn">Note grave seule</button><button id="micSeul2" class="btn">Note aiguë seule</button></div>
+    <div id="micAutres" class="aide"></div>
+    <p class="aide">« Note seule » : joue une seule note, l'appli repère si elle bat toute seule (fausse corde) et ignore ensuite ce battement dans la mesure. Il faut 1 à 3 s d'écoute pour un battement rapide, 4 à 6 s pour un battement lent. Vert : écart ≤ 8 % de la cible, orange ≤ 20 %.</p>
+  </section>
+
+  <section id="vueCompte" hidden>
+    <p class="aide">Joue l'intervalle sur le piano et appuie sur « Battement » à chaque battement entendu, pendant 10 s. L'appli compare avec la théorie.</p>
+    <div class="ligne"><select id="cptIv" aria-label="Intervalle à compter"></select></div>
+    <div id="cptTemps" class="quiz-hz">10,0 s</div>
+    <button id="cptStart" class="btn princ">Démarrer</button>
+    <button id="cptTap" class="tap" disabled>Battement</button>
+    <div id="cptRes" class="quiz-retour" aria-live="polite"></div>
+  </section>
+
+  <p class="aide bas">Tempérament égal, La4 réglable. B est le coefficient d'inharmonicité : 0 donne la théorie pure, avec des partiels exactement harmoniques. Compte les battements sur 10 s pour t'entraîner. Au-delà de 20 Hz, on n'entend plus des battements mais de la rugosité.</p>
+  <p class="aide bas">Piano enregistré : Salamander Grand Piano (Yamaha C5), Alexander Holm, licence CC BY 3.0. Les vitesses affichées sont mesurées sur ces enregistrements (B sans effet). Un seul piano, et chaque piano est différent : sers-toi-en pour entraîner l'oreille, pas comme vérité absolue.</p>
+</main>
+
+<div id="barre" hidden>
+  <div id="pouls" class="pouls"></div>
+  <div id="barreTexte" class="barre-texte"></div>
+  <button id="btnStop">Stop</button>
+</div>
+
+<script>
+var DATA_REEL = /*DATA*/null;
+</script>
+<script>
+/*BAT*/
+</script>
+<script>
+/*MES*/
+</script>
+<script>
+/*APP*/
+</script>
