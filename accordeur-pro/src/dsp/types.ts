@@ -54,6 +54,10 @@ export interface DetectedNote {
   name: string;
   /** Écart de f0 à la touche, en cents (tempérament égal, La4 réglé) */
   cents: number;
+  /** Suivi de séquence : lecture provisoire (grand saut pas encore confirmé) */
+  tentative?: boolean;
+  /** Suivi de séquence : correction appliquée à l'attribution de la touche */
+  correction?: 'glissement' | 'continuite' | 'saut' | 'manuel';
 }
 
 export interface FrameMeasurement {
@@ -85,4 +89,6 @@ export interface ProcessorEvent {
   fused?: FusedMeasurement;
   /** Vrai à l'instant où la mesure est figée */
   frozenNow?: boolean;
+  /** Suivi de séquence : bilan de la frappe qui vient de se terminer */
+  committed?: import('./noteTracker').StrikeCommit;
 }

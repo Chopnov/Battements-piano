@@ -167,6 +167,16 @@ function coarseCandidates(p: Prep, lo: number, hi: number, stepCents: number, kL
  * (bruit blanc, voix, ventilation...).
  */
 export function fitInharmonicity(peaks: SpectralPeak[], opts: FitOptions = {}): FitResult | FitRejection {
+  const r = fitInharmonicityScored(peaks, opts);
+  return 'rejected' in r ? r : r.fit;
+}
+
+/**
+ * Comme fitInharmonicity, mais renvoie aussi le score de vraisemblance de la série retenue
+ * (cohérence × part des rangs k attendus effectivement trouvés, 0..1). Sert au suivi de séquence
+ * pour comparer « note attendue » et « détection libre ».
+ */
+export function fitInharmonicityScored(peaks: SpectralPeak[], opts: FitOptions = {}): { fit: FitResult; score: number } | FitRejection {
   const o = { ...DEF, ...opts };
   if (peaks.length < 2) return { rejected: 'no-peaks' };
   const p: Prep = { peaks: [...peaks].sort((a, b) => a.freq - b.freq) };
@@ -188,7 +198,7 @@ export function fitInharmonicity(peaks: SpectralPeak[], opts: FitOptions = {}): 
     const score = r.fit.coherence * r.found / Math.max(1, r.expected);
     if (!best || score > best.score) best = { fit: r.fit, score };
   }
-  return best ? best.fit : lastReject;
+  return best ?? lastReject;
 }
 
 type Opts = typeof DEF & FitOptions;

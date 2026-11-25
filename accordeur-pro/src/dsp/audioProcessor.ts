@@ -1,5 +1,6 @@
 import { SpectrumAnalyzer, type Spectrum } from './spectrum';
-import { fitInharmonicity, isRejection, centsBetween, type FitOptions } from './inharmonicityEngine';
+import { fitInharmonicity, fitInharmonicityScored, isRejection, centsBetween, midiToFreq, type FitOptions } from './inharmonicityEngine';
+import type { NoteTracker, StrikePlan } from './noteTracker';
 import { noteName } from './tuningCurve';
 import type { DetectedNote, FrameRejection, FusedMeasurement, ProcessorEvent, ProcessorState } from './types';
 
@@ -19,12 +20,22 @@ export interface ProcessorConfig {
   minSnrDb: number;
   fMinAnalysis: number;
   fMaxAnalysis: number;
+  /**
+   * Avec un suivi de note : fenêtre adaptée au registre de la note attendue
+   * (16384 graves, 8192 médium, 4096 aigus à 48 kHz ; pas = fenêtre / 8).
+   */
+  adaptiveWindow: boolean;
+}
+
+/** Taille de fenêtre selon la note attendue (à 48 kHz ; proportionnelle à la fréquence d'échantillonnage). */
+export function windowForMidi(midi: number | undefined): number {
+  return midi === undefined || midi < 45 ? 16384 : midi < 64 ? 8192 : 4096;
 }
 
 export const DEFAULT_CONFIG: ProcessorConfig = {
   sampleRate: 48000, frameSize: 16384, hop: 4096, zeroPad: 4,
   transientMs: 40, onsetRatio: 4, offRatio: 2, minSnrDb: 10,
-  fMinAnalysis: 20, fMaxAnalysis: 12000,
+  fMinAnalysis: 20, fMaxAnalysis: 12000, adaptiveWindow: true,
 };
 
 const BLOCK_MS = 5;
@@ -39,10 +50,17 @@ const BLOCK_MS = 5;
  */
 export class AudioProcessor {
   readonly cfg: ProcessorConfig;
-  private analyzer: SpectrumAnalyzer;
+  private analyzers = new Map<number, SpectrumAnalyzer>();
+  private size: number;
+  private hop: number;
+  private tracker: NoteTracker | undefined;
+  private plan: StrikePlan | undefined;
+  private freeRuns = 0;
+  private lastNote: DetectedNote | undefined;
   private ring: Float32Array;
   private total = 0;                 // échantillons reçus au total
   private lastFrameEnd = 0;
+  private lastNoiseRef = 0;
   private blockSize: number;
   private blockAcc = 0; private blockN = 0;
   private blockStart = 0;
@@ -52,21 +70,47 @@ export class AudioProcessor {
   private onsetSample = -1;
   private belowCount = 0;
   private prevRms: number[] = [];
-  private noiseRef: Float64Array | null = null;
-  private frames: { f0c: number; B: number; sigma: number; fund: boolean; f0: number }[] = [];
+  private noiseRefs = new Map<number, Float64Array>();
+  private frames: { f0c: number; B: number; sigma: number; fund: boolean; f0: number; key?: number }[] = [];
   private fusedFinal: FusedMeasurement | undefined;
   private fitOpts: FitOptions = {};
 
   constructor(cfg: Partial<ProcessorConfig> = {}) {
     this.cfg = { ...DEFAULT_CONFIG, ...cfg };
-    this.analyzer = new SpectrumAnalyzer(this.cfg.sampleRate, this.cfg.frameSize, this.cfg.zeroPad, this.cfg.fMaxAnalysis);
-    this.ring = new Float32Array(this.cfg.frameSize * 2);
+    this.size = this.cfg.frameSize; this.hop = this.cfg.hop;
+    this.ring = new Float32Array(Math.max(this.cfg.frameSize, 16384) * 2);
     this.blockSize = Math.round((BLOCK_MS / 1000) * this.cfg.sampleRate);
   }
 
   /** Note visée et diapason (l'accordeur sait quelle touche il joue). */
-  setTarget(midi: number | undefined, la4 = 440): void { this.fitOpts = { midiHint: midi, la4 }; this.la4 = la4; }
+  setTarget(midi: number | undefined, la4 = 440): void { this.fitOpts = { midiHint: midi, la4 }; this.la4 = la4; this.tracker?.setLa4(la4); }
   private la4 = 440;
+
+  /**
+   * Branche le suivi de séquence (détection intelligente). Sans suivi : comportement de l'étape 1
+   * (touche visée par setTarget, ou détection libre).
+   */
+  setTracker(t: NoteTracker | undefined): void { this.tracker = t; t?.setLa4(this.la4); }
+  get noteTracker(): NoteTracker | undefined { return this.tracker; }
+  /** Nombre total d'échantillons reçus (horloge commune avec l'enregistreur) */
+  get samplesSeen(): number { return this.total; }
+  /** Taille de la fenêtre d'analyse en cours */
+  get windowSize(): number { return this.size; }
+
+  private analyzer(n: number): SpectrumAnalyzer {
+    let a = this.analyzers.get(n);
+    if (!a) { a = new SpectrumAnalyzer(this.cfg.sampleRate, n, this.cfg.zeroPad, this.cfg.fMaxAnalysis); this.analyzers.set(n, a); }
+    return a;
+  }
+
+  /** Choisit la fenêtre selon le plan du suivi (au début de chaque frappe et pendant les silences). */
+  private applyPlan(): void {
+    if (!this.tracker) return;
+    this.plan = this.tracker.plan();
+    if (!this.cfg.adaptiveWindow) return;
+    this.size = windowForMidi(this.plan.windowMidi);
+    this.hop = this.size / 8;
+  }
 
   /** Touche la plus proche de f0 (tempérament égal) et écart en cents. */
   identify(f0: number): DetectedNote {
@@ -102,7 +146,7 @@ export class AudioProcessor {
   private onBlock(rms: number): ProcessorEvent | null {
     const { cfg } = this;
     this.blockRms.push({ start: this.blockStart, rms });
-    const keep = Math.ceil((cfg.frameSize * 1.5) / this.blockSize);
+    const keep = Math.ceil((Math.max(cfg.frameSize, this.size) * 1.5) / this.blockSize);
     if (this.blockRms.length > keep) this.blockRms.shift();
 
     // --- plancher de bruit initial : minimum sur les 0,5 premières secondes ---
@@ -110,7 +154,7 @@ export class AudioProcessor {
       this.floorInit = this.floorBlocks === 0 ? rms : Math.min(this.floorInit, rms);
       this.floorBlocks++;
       this.floor = Math.max(this.floorInit, 1e-6);
-      this.prevRms.push(rms);
+      this.prevRms.push(rms); if (this.prevRms.length > 4) this.prevRms.shift();
       return null;
     }
     const prevMean = this.prevRms.length ? this.prevRms.reduce((a, b) => a + b, 0) / this.prevRms.length : rms;
@@ -119,6 +163,7 @@ export class AudioProcessor {
 
     let rejected: FrameRejection | undefined;
     let frozenNow = false;
+    let committed: ProcessorEvent['committed'];
 
     if (this.state === 'silent' || this.state === 'frozen') {
       // le plancher suit le minimum : descend vite, remonte lentement (~25 s)
@@ -128,15 +173,19 @@ export class AudioProcessor {
         // l'attaque a pu commencer dans le bloc précédent
         this.onsetSample = this.blockStart - this.blockSize;
         this.frames = []; this.fusedFinal = undefined; this.belowCount = 0;
+        this.startStrike();
       }
     } else {
       if (rms < offThr) this.belowCount++; else this.belowCount = 0;
       if (this.belowCount >= 3) {
         this.state = 'frozen'; frozenNow = true;
         this.fusedFinal = this.fuse();
+        committed = this.endStrike(this.fusedFinal);
       } else if (rms > onThr && rms > 3 * prevMean) {
-        // nouvelle frappe : on repart de zéro
+        // nouvelle frappe : on clôt la précédente et on repart de zéro
+        committed = this.endStrike(this.fuse());
         this.onsetSample = this.blockStart - this.blockSize; this.frames = []; this.state = 'attack'; rejected = 'retrigger';
+        this.startStrike();
       } else if (this.state === 'attack' && this.blockStart >= this.onsetSample + (cfg.transientMs / 1000) * cfg.sampleRate) {
         this.state = 'sustain';
       }
@@ -145,26 +194,41 @@ export class AudioProcessor {
 
     let frame: ProcessorEvent['frame'];
     // --- fenêtre d'analyse à chaque pas ---
-    if (this.total >= cfg.frameSize && this.total - this.lastFrameEnd >= cfg.hop) {
+    if (this.total >= this.size && this.total - this.lastFrameEnd >= this.hop) {
       this.lastFrameEnd = this.total;
       if (this.state === 'attack' || this.state === 'sustain') {
         const r = this.analyzeFrame(offThr);
         if ('reason' in r) rejected = rejected ?? r.reason; else frame = r.frame;
-      } else if (this.state === 'silent') {
-        this.updateNoiseRef(offThr);
+      } else {
+        if (this.tracker) this.applyPlan();
+        // plancher spectral de référence, rafraîchi au plus toutes les 100 ms
+        if ((this.state === 'silent' || this.tracker) && this.total - this.lastNoiseRef >= 0.1 * cfg.sampleRate) {
+          this.lastNoiseRef = this.total; this.updateNoiseRef(offThr);
+        }
       }
     }
 
     return {
       time: this.total / cfg.sampleRate, state: this.state,
       rmsDb: 20 * Math.log10(rms + 1e-9), noiseFloorDb: 20 * Math.log10(this.floor + 1e-9),
-      frame, rejected, frozenNow,
+      frame, rejected, frozenNow, committed,
       fused: this.state === 'frozen' ? this.fusedFinal : this.fuse(),
     };
   }
 
+  private startStrike(): void {
+    if (!this.tracker) return;
+    this.tracker.beginStrike(); this.freeRuns = 0;
+    this.applyPlan();
+  }
+
+  private endStrike(fused: FusedMeasurement | undefined): ProcessorEvent['committed'] {
+    if (!this.tracker) return undefined;
+    return this.tracker.commit(fused ? { f0: fused.f0, B: fused.B } : undefined) ?? undefined;
+  }
+
   private frameSamples(): { data: Float32Array; start: number } {
-    const N = this.cfg.frameSize, L = this.ring.length, start = this.total - N;
+    const N = this.size, L = this.ring.length, start = this.total - N;
     const data = new Float32Array(N);
     for (let i = 0; i < N; i++) data[i] = this.ring[(start + i) % L];
     return { data, start };
@@ -181,9 +245,11 @@ export class AudioProcessor {
     let pk = 0; for (let i = 0; i < data.length; i++) { const a = Math.abs(data[i]); if (a > pk) pk = a; }
     if (pk >= 0.999) return { reason: 'clipping' };
 
-    const spec = this.analyzer.analyze(data);
+    const an = this.analyzer(this.size);
+    const spec = an.analyze(data);
     const noise = this.noiseDb(spec);
-    const peaks = this.analyzer.pickPeaks(spec, noise, { fMin: cfg.fMinAnalysis, fMax: cfg.fMaxAnalysis, minSnrDb: cfg.minSnrDb });
+    const peaks = an.pickPeaks(spec, noise, { fMin: cfg.fMinAnalysis, fMax: cfg.fMaxAnalysis, minSnrDb: cfg.minSnrDb });
+    if (this.tracker) return this.analyzeTracked(peaks, start);
     const fit = fitInharmonicity(peaks, { ...this.fitOpts, fMinAnalysis: cfg.fMinAnalysis, fMaxAnalysis: cfg.fMaxAnalysis });
     if (isRejection(fit)) return { reason: fit.rejected };
     const sigma = Math.max(0.05, fit.sigmaF0Cents);
@@ -191,27 +257,56 @@ export class AudioProcessor {
     return { frame: { startSample: start, fit, note: this.identify(fit.f0) } };
   }
 
+  /** Analyse guidée par la séquence + détection libre limitée (premières fenêtres, ou quand la séquence échoue). */
+  private analyzeTracked(peaks: ReturnType<SpectrumAnalyzer['pickPeaks']>, start: number): { reason: FrameRejection } | { frame: NonNullable<ProcessorEvent['frame']> } {
+    const t = this.tracker!, plan = this.plan ?? t.plan(), cfg = this.cfg;
+    const base = { la4: this.la4, fMinAnalysis: cfg.fMinAnalysis, fMaxAnalysis: cfg.fMaxAnalysis };
+    // très haut aigu : peu de partiels sous 12 kHz, 2 suffisent quand la note est attendue
+    const minFor = (f: number) => (cfg.fMaxAnalysis / f < 5 ? 2 : 3);
+    let guided = null as ReturnType<typeof fitInharmonicityScored> | null;
+    if (plan.center !== undefined) {
+      guided = fitInharmonicityScored(peaks, { ...base, midiHint: plan.center, searchCents: plan.searchCents, minPartials: minFor(midiToFreq(plan.center, this.la4)) });
+    }
+    let free = null as ReturnType<typeof fitInharmonicityScored> | null;
+    if (plan.runFree && (this.freeRuns < 2 || !guided || 'rejected' in guided)) {
+      free = fitInharmonicityScored(peaks, base); this.freeRuns++;
+    }
+    const att = t.observe(guided, free);
+    if (!att) {
+      const r = (guided && 'rejected' in guided ? guided : free && 'rejected' in free ? free : { rejected: 'low-coherence' as const });
+      return { reason: r.rejected };
+    }
+    const fit = att.fit;
+    this.lastNote = { midi: att.midi, name: att.name, cents: att.cents, tentative: att.tentative, correction: att.correction };
+    // la touche peut varier en cours de frappe : la fusion ne garde que les fenêtres de la touche dominante (voir fuse)
+    this.frames.push({ f0: fit.f0, f0c: 0, B: fit.B, sigma: Math.max(0.05, fit.sigmaF0Cents), fund: fit.fundamentalUsed, key: att.midi });
+    return { frame: { startSample: start, fit, note: { midi: att.midi, name: att.name, cents: att.cents, tentative: att.tentative, correction: att.correction } } };
+  }
+
   /** Plancher spectral : bruit local, relevé par le plancher mesuré dans les silences. */
   private noiseDb(spec: Spectrum): Float64Array {
-    const local = this.analyzer.noiseCurve(spec);
-    if (!this.noiseRef || this.noiseRef.length !== local.length) return local;
+    const local = this.analyzer(this.size).noiseCurve(spec);
+    const ref = this.noiseRefs.get(this.size);
+    if (!ref || ref.length !== local.length) return local;
     const out = new Float64Array(local.length);
-    for (let i = 0; i < local.length; i++) out[i] = Math.max(local[i], this.noiseRef[i] + 3);
+    for (let i = 0; i < local.length; i++) out[i] = Math.max(local[i], ref[i] + 3);
     return out;
   }
 
   private updateNoiseRef(offThr: number): void {
-    for (const b of this.blockRms) if (b.start >= this.total - this.cfg.frameSize && b.rms >= offThr) return;
+    for (const b of this.blockRms) if (b.start >= this.total - this.size && b.rms >= offThr) return;
     const { data } = this.frameSamples();
-    const spec = this.analyzer.analyze(data);
-    const cur = this.analyzer.noiseCurve(spec);
-    if (!this.noiseRef || this.noiseRef.length !== cur.length) this.noiseRef = cur;
-    else for (let i = 0; i < cur.length; i++) this.noiseRef[i] = 0.8 * this.noiseRef[i] + 0.2 * cur[i];
+    const an = this.analyzer(this.size);
+    const cur = an.noiseCurve(an.analyze(data));
+    const ref = this.noiseRefs.get(this.size);
+    if (!ref || ref.length !== cur.length) this.noiseRefs.set(this.size, cur);
+    else for (let i = 0; i < cur.length; i++) ref[i] = 0.8 * ref[i] + 0.2 * cur[i];
   }
 
   /** Fusion des fenêtres valides : moyenne pondérée par 1/σ² (f0 en cents), B en log. */
   private fuse(): FusedMeasurement | undefined {
-    const fr = this.frames;
+    const key = this.tracker ? this.tracker.strikeKey : undefined;
+    const fr = key !== undefined ? this.frames.filter(f => f.key === key) : this.frames;
     if (!fr.length) return undefined;
     const ref = fr[0].f0;
     let sw = 0, sc = 0, sb = 0;
@@ -220,8 +315,12 @@ export class AudioProcessor {
       sw += w; sc += w * centsBetween(f.f0, ref); sb += w * Math.log(Math.max(f.B, 1e-7));
     }
     const f0 = ref * Math.pow(2, sc / sw / 1200);
+    const last = this.lastNote;
+    const note = key !== undefined
+      ? { midi: key, name: noteName(key), cents: centsBetween(f0, midiToFreq(key, this.la4)), tentative: last?.midi === key ? last.tentative : false, correction: last?.midi === key ? last.correction : undefined }
+      : this.identify(f0);
     return {
-      f0, B: Math.exp(sb / sw), note: this.identify(f0),
+      f0, B: Math.exp(sb / sw), note,
       sigmaF0Cents: Math.sqrt(1 / sw), frames: fr.length, fundamentalUsed: fr.some(f => f.fund),
     };
   }

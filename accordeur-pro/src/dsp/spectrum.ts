@@ -2,6 +2,8 @@ import { FFT } from './fft';
 import { blackmanHarris } from './window';
 import type { SpectralPeak } from './types';
 
+const H_MIN = -260, H_RES = 4, H_BINS = 300 * H_RES; // histogramme des niveaux : −260 à +40 dB, pas de 0,25 dB
+
 export interface Spectrum {
   /** Amplitude crête en dBFS, bin par bin, de 0 à maxBin inclus */
   magDb: Float64Array;
@@ -30,6 +32,7 @@ export class SpectrumAnalyzer {
   private gain: number;
   private re: Float64Array;
   private im: Float64Array;
+  private hist = new Int32Array(H_BINS);
 
   constructor(readonly sampleRate: number, frameSize = 16384, zeroPad = 4, fMaxAnalysis = 12000) {
     this.frameSize = frameSize;
@@ -70,11 +73,21 @@ export class SpectrumAnalyzer {
     const n = spec.magDb.length, out = new Float64Array(n);
     const hw = Math.max(8, Math.round(halfWidthHz / spec.binHz)), step = Math.max(1, Math.round(hw / 8));
     const centers: number[] = [], vals: number[] = [];
+    // Centile glissant par histogramme (pas de 0,25 dB) : O(n) au lieu d'un tri par centre.
+    const hist = this.hist;
+    hist.fill(0);
+    const slot = (v: number) => Math.min(H_BINS - 1, Math.max(0, Math.floor((v - H_MIN) * H_RES)));
+    const m = spec.magDb;
+    let a = 0, b = 0, count = 0;
     for (let c = 0; c < n + step; c += step) {
       const ci = Math.min(c, n - 1);
-      const a = Math.max(0, ci - hw), b = Math.min(n, ci + hw + 1);
-      const sub = Array.from(spec.magDb.subarray(a, b)).sort((x, y) => x - y);
-      centers.push(ci); vals.push(sub[Math.floor(sub.length * 0.15)] + 6.3);
+      const na = Math.max(0, ci - hw), nb = Math.min(n, ci + hw + 1);
+      while (b < nb) { hist[slot(m[b++])]++; count++; }
+      while (a < na) { hist[slot(m[a++])]--; count--; }
+      const target = Math.floor(count * 0.15);
+      let cum = 0, k = 0;
+      for (; k < H_BINS; k++) { cum += hist[k]; if (cum > target) break; }
+      centers.push(ci); vals.push(H_MIN + (k + 0.5) / H_RES + 6.3);
     }
     let j = 0;
     for (let i = 0; i < n; i++) {
