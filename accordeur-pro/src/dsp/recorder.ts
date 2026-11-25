@@ -13,62 +13,103 @@ export interface LogEntry {
   t: number;
   /** Échantillon (dans le WAV) */
   sample: number;
-  type: 'frappe' | 'correction' | 'reglage' | 'note';
+  type: 'frappe' | 'correction' | 'reglage' | 'note' | 'marque' | 'pause' | 'reprise';
   [k: string]: unknown;
 }
 
-const CHUNK = 48000 * 3 * 10; // 10 s par bloc
+export interface RecorderOptions {
+  /** 24 (défaut, PR étape 2) ou 16 bits : 16 bits suffisent pour un micro de téléphone et divisent la taille par 1,5 */
+  bits?: 16 | 24;
+  /**
+   * Si fourni, chaque bloc plein (10 s) lui est confié au lieu d'être gardé en mémoire
+   * (séances longues : stockage sur le téléphone au fil de l'eau, rien de perdu si l'appli plante).
+   * wav() n'est alors plus disponible : le fichier se reconstitue depuis le stockage.
+   */
+  onChunk?: (bytes: Uint8Array, index: number) => void;
+}
 
 export class Recorder {
   readonly sampleRate: number;
+  readonly bits: 16 | 24;
+  private readonly onChunk?: (bytes: Uint8Array, index: number) => void;
+  private readonly chunkBytes: number;
+  private chunkIndex = 0;
+  private paused = false;
+  /** Échantillons du flux non enregistrés (pauses), pour garder le journal calé sur le WAV */
+  private skipped = 0;
+  private lastStream = 0;
   /** Échantillon du flux d'analyse qui correspond au début du WAV */
   readonly streamStart: number;
   readonly startedAt: Date;
   private chunks: Uint8Array[] = [];
-  private cur = new Uint8Array(CHUNK);
+  private cur: Uint8Array;
   private pos = 0;
   private n = 0;
   private peak = 0;
   readonly log: LogEntry[] = [];
   meta: Record<string, unknown> = {};
 
-  constructor(sampleRate: number, streamStart = 0, now = new Date()) {
+  constructor(sampleRate: number, streamStart = 0, now = new Date(), opts: RecorderOptions = {}) {
     this.sampleRate = sampleRate; this.streamStart = streamStart; this.startedAt = now;
+    this.bits = opts.bits ?? 24; this.onChunk = opts.onChunk;
+    this.chunkBytes = sampleRate * (this.bits / 8) * 10;   // 10 s par bloc
+    this.cur = new Uint8Array(this.chunkBytes);
+    this.lastStream = streamStart;
   }
+
+  get isPaused(): boolean { return this.paused; }
+  /** Pause (conversation avec le client, unissons…) : le son n'est plus gardé, le journal non plus. */
+  pause(streamSample: number): void { if (this.paused) return; this.note('pause', streamSample, {}); this.paused = true; this.lastStream = streamSample; }
+  resume(streamSample: number): void {
+    if (!this.paused) return;
+    this.skipped += Math.max(0, streamSample - this.lastStream); this.paused = false;
+    this.note('reprise', streamSample, { pauseDe_s: +((streamSample - this.lastStream) / this.sampleRate).toFixed(1) });
+  }
+  /** Nombre de blocs déjà confiés à onChunk */
+  get flushedChunks(): number { return this.chunkIndex; }
+
+  private flush(): void {
+    if (this.onChunk) { this.onChunk(this.pos === this.chunkBytes ? this.cur : this.cur.slice(0, this.pos), this.chunkIndex); this.cur = new Uint8Array(this.chunkBytes); }
+    else { this.chunks.push(this.cur); this.cur = new Uint8Array(this.chunkBytes); }
+    this.chunkIndex++; this.pos = 0;
+  }
+
+  /** Bloc en cours, pas encore plein (à stocker à l'arrêt) */
+  tail(): Uint8Array { return this.cur.slice(0, this.pos); }
 
   get samples(): number { return this.n; }
   get seconds(): number { return this.n / this.sampleRate; }
-  get bytes(): number { return this.n * 3; }
+  get bytes(): number { return this.n * (this.bits / 8); }
   /** Crête absolue depuis le début (1 = pleine échelle) */
   get peakLevel(): number { return this.peak; }
 
   push(x: Float32Array): void {
+    if (this.paused) return;
+    const b24 = this.bits === 24, scale = b24 ? 8388607 : 32767, bps = b24 ? 3 : 2;
     for (let i = 0; i < x.length; i++) {
       let v = x[i];
       const a = Math.abs(v); if (a > this.peak) this.peak = a;
       if (v > 1) v = 1; else if (v < -1) v = -1;
-      const q = Math.round(v * 8388607);
-      if (this.pos + 3 > CHUNK) { this.chunks.push(this.cur); this.cur = new Uint8Array(CHUNK); this.pos = 0; }
-      this.cur[this.pos++] = q & 0xff; this.cur[this.pos++] = (q >> 8) & 0xff; this.cur[this.pos++] = (q >> 16) & 0xff;
+      const q = Math.round(v * scale);
+      if (this.pos + bps > this.chunkBytes) this.flush();
+      this.cur[this.pos++] = q & 0xff; this.cur[this.pos++] = (q >> 8) & 0xff;
+      if (b24) this.cur[this.pos++] = (q >> 16) & 0xff;
     }
     this.n += x.length;
   }
 
   /** Ajoute une ligne au journal ; streamSample = horloge du processeur (AudioProcessor.samplesSeen). */
   note(type: LogEntry['type'], streamSample: number, data: Record<string, unknown>): void {
-    const sample = Math.max(0, streamSample - this.streamStart);
+    if (this.paused) return;
+    const sample = Math.max(0, streamSample - this.streamStart - this.skipped);
     this.log.push({ t: +(sample / this.sampleRate).toFixed(4), sample, type, ...data });
   }
 
   /** Fichier WAV complet (PCM 24 bits mono). */
   wav(): Uint8Array {
-    const dataBytes = this.n * 3, out = new Uint8Array(44 + dataBytes), dv = new DataView(out.buffer);
-    const str = (o: number, s: string) => { for (let i = 0; i < s.length; i++) out[o + i] = s.charCodeAt(i); };
-    str(0, 'RIFF'); dv.setUint32(4, 36 + dataBytes, true); str(8, 'WAVE');
-    str(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
-    dv.setUint32(24, this.sampleRate, true); dv.setUint32(28, this.sampleRate * 3, true);
-    dv.setUint16(32, 3, true); dv.setUint16(34, 24, true);
-    str(36, 'data'); dv.setUint32(40, dataBytes, true);
+    if (this.onChunk) throw new Error('enregistrement stocké au fil de l’eau : reconstituer le WAV depuis le stockage');
+    const dataBytes = this.bytes, out = new Uint8Array(44 + dataBytes);
+    out.set(wavHeader(dataBytes, this.sampleRate, this.bits), 0);
     let o = 44;
     for (const c of this.chunks) { out.set(c, o); o += c.length; }
     out.set(this.cur.subarray(0, this.pos), o);
@@ -79,7 +120,7 @@ export class Recorder {
   journal(): string {
     return JSON.stringify({
       app: 'Accordeur Pro', format: 1, debut: this.startedAt.toISOString(),
-      frequence: this.sampleRate, duree: +this.seconds.toFixed(3), crete: +this.peak.toFixed(4),
+      frequence: this.sampleRate, bits: this.bits, duree: +this.seconds.toFixed(3), crete: +this.peak.toFixed(4),
       ...this.meta, journal: this.log,
     }, null, 1);
   }
@@ -89,6 +130,18 @@ export class Recorder {
     const d = this.startedAt, p = (v: number) => String(v).padStart(2, '0');
     return `accord-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
   }
+}
+
+/** En-tête WAV PCM mono de 44 octets, pour dataBytes octets de données. */
+export function wavHeader(dataBytes: number, sampleRate: number, bits: 16 | 24): Uint8Array {
+  const out = new Uint8Array(44), dv = new DataView(out.buffer), bps = bits / 8;
+  const str = (o: number, s: string) => { for (let i = 0; i < s.length; i++) out[o + i] = s.charCodeAt(i); };
+  str(0, 'RIFF'); dv.setUint32(4, 36 + dataBytes, true); str(8, 'WAVE');
+  str(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, sampleRate, true); dv.setUint32(28, sampleRate * bps, true);
+  dv.setUint16(32, bps, true); dv.setUint16(34, bits, true);
+  str(36, 'data'); dv.setUint32(40, dataBytes, true);
+  return out;
 }
 
 /** Relit un WAV PCM 16/24 bits ou flottant 32 bits (mono ou moyenne des canaux). Utilisé par les tests et le banc d'essai. */
