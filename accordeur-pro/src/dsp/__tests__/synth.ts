@@ -23,6 +23,8 @@ export interface NoteSpec {
   level?: number;
   /** durée du bruit de marteau (s) */
   hammerMs?: number;
+  /** gain du partiel k=1 (ex. 0,1 = −20 dB : fondamentale faible, cas typique des erreurs d'octave) */
+  k1Gain?: number;
 }
 
 /** Note de piano synthétique : partiels de Fletcher, amplitudes décroissantes avec le rang, décroissance exponentielle plus rapide dans l'aigu. */
@@ -32,7 +34,7 @@ export function synthNote(spec: NoteSpec, seed = 1): Float32Array {
   for (let k = kMin; k <= kMax; k++) {
     const f = partialFreq(f0, B, k);
     if (f > 20000) break;
-    const a = level * Math.pow(k, -0.5) * (0.5 + 0.5 * Math.abs(Math.sin(Math.PI * k / 8.3)));
+    const a = level * Math.pow(k, -0.5) * (0.5 + 0.5 * Math.abs(Math.sin(Math.PI * k / 8.3))) * (k === 1 ? spec.k1Gain ?? 1 : 1);
     const tau = 4 / (1 + 0.3 * (k - 1)), ph = 2 * Math.PI * r.u(), w = (2 * Math.PI * f) / SR;
     for (let i = 0; i < n; i++) x[i] += a * Math.exp(-i / SR / tau) * Math.sin(w * i + ph);
   }

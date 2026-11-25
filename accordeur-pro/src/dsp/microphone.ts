@@ -18,6 +18,8 @@ export interface MicSession {
 export async function startMicrophone(
   onEvent: (e: ProcessorEvent) => void,
   cfg: Partial<ProcessorConfig> = {},
+  /** Reçoit chaque paquet brut AVANT l'analyse (enregistrement WAV, même horloge que le processeur) */
+  onSamples?: (x: Float32Array) => void,
 ): Promise<MicSession> {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -35,6 +37,7 @@ export async function startMicrophone(
   const processor = new AudioProcessor({ ...cfg, sampleRate: ctx.sampleRate });
   const node = new AudioWorkletNode(ctx, 'capture-processor', { numberOfInputs: 1, numberOfOutputs: 0, channelCount: 1 });
   node.port.onmessage = (m: MessageEvent<{ samples: Float32Array }>) => {
+    onSamples?.(m.data.samples);
     for (const ev of processor.push(m.data.samples)) onEvent(ev);
   };
   const src = ctx.createMediaStreamSource(stream);

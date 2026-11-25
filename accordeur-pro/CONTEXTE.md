@@ -23,7 +23,15 @@
 - Détection automatique de la note (hypothèses f0, f0/2, 2f0) et cadran ±50 cents (`src/ui/dial.ts`).
 - 33 tests automatisés (`npm test`) ; précision vérifiée seulement sur signaux synthétiques, pas encore sur vrais pianos.
 
-## Étape 2 (validée par Thomas, à faire)
+## Étape 2 — fait le 2026-11-25 (points 1, 2, 5)
+- `src/dsp/noteTracker.ts` : détection qui suit la séquence. Recherche guidée dans c±2,5 demi-tons (pas d'octave possible), détection libre seulement pour repérer les grands sauts (2 frappes concordantes, 3 si octave/douzième/double octave). Glissement (note précédente juste + écart > 15 ct dans le sens d'accord → touche suivante), continuité (note pas encore juste qui franchit ±50 ct → même touche), sens appris, cadenas, flèches ◀ ▶ (cadenas + flèches = mode manuel).
+- Fenêtre selon le registre : 16384 (< A2), 8192 (A2–D♯4), 4096 (≥ E4), pas = fenêtre/8.
+- `src/dsp/recorder.ts` : bouton ⏺ Enregistrer → WAV 24 bits mono + journal JSON (note, cents, f0, B, σ, première lecture en ms, corrections, sauts en attente, réglages).
+- Corrigé : la moyenne servant à détecter les attaques portait sur 0,5 s au lieu de 20 ms (fausses « nouvelles frappes » pendant 150 ms, lecture retardée). Plancher de bruit spectral recalculé sans tri (calcul ~8× plus léger).
+- Test `sequence.test.ts` : accord 1→88 simulé (264 frappes, zone à remonter de 40–70 ct, 30 % de notes à fondamentale faible) : 0 erreur de touche ; première lecture graves ≤ 425 ms, médium ≤ 215 ms, aigus ≤ 140 ms (synthétique). Essai navigateur avec micro simulé OK.
+- Reste à faire : valider sur vrai piano avec les enregistrements ; analyse dans un Worker si le téléphone peine.
+
+## Étape 2 (validée par Thomas, plan d'origine)
 1. Détection de note intelligente qui connaît la séquence (même note ou suivante probables, grands sauts acceptés seulement après 2–3 frappes concordantes, sens appris, correction par glissement ±1 demi-ton, cadenas, mode manuel). Objectif : zéro erreur d'octave sur un accord 1→88, première lecture < 250 ms dans les aigus, < 600 ms dans les graves.
 2. Fenêtre d'analyse adaptée au registre (≈16384 échantillons graves, ≈4096 aigus).
 3. Plusieurs affichages à comparer : cadran à aiguille physique (ressort amorti), stroboscope ; état « juste » net avec hystérésis, vibration, son optionnel ; couleurs lisibles par les daltoniens ; mode sombre / plein soleil ; écran maintenu allumé. Thomas choisira à la fin.

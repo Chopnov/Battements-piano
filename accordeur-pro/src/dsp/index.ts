@@ -6,3 +6,5 @@ export * from './inharmonicityEngine';
 export * from './audioProcessor';
 export * from './tuningCurve';
 export { startMicrophone, type MicSession } from './microphone';
+export * from './noteTracker';
+export * from './recorder';
