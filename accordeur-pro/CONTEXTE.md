@@ -52,3 +52,10 @@ Ordre conseillé : enregistrement + détection intelligente d'abord, affichages 
 - GitHub : Chopnov/Battements-piano (public), Pages sur main /docs.
 - `tools/build.js` assemble Battements Piano dans `docs/index.html`.
 - Accordeur : `cd accordeur-pro && npm install && npm test && npm run build`, puis copier `dist/` dans `docs/accordeur/`.
+
+## Base d'accords réels (2026-11-25, branche `claude/project-thread-1mm59z`, au-dessus de l'étape 2)
+- Thomas enregistre ses accords (pianos Yamaha uniquement) pour valider le moteur sur vrais pianos. Accordeur Pro enregistre sur un téléphone pendant qu'il accorde au PTA-1 sur l'autre.
+- `src/seance/` : séance stockée au fil de l'eau dans IndexedDB (blocs de 10 s, WAV 16 bits, ≈ 350 Mo/h, récupérable après plantage), écran maintenu allumé, Pause (conversation, unissons), marque « passe de contrôle », test d'intervalle (bas seul / haut seul / ensemble + verdict juste/large/étroite et paire 2:1/4:2/6:3), fiche du piano (modèle, n° de série, taille, La4, réglage de l'accordeur, position du téléphone, relevé facultatif note par note), envoi WAV + JSON par la feuille de partage (Drive) ou téléchargement.
+- `Recorder` : options `bits` (16/24) et `onChunk` ; pause/reprise gardent le journal calé sur le WAV. Comportement par défaut de l'étape 2 inchangé.
+- Point clé d'analyse : comme Thomas amène chaque note au zéro du PTA-1, la hauteur finale de chaque note dans l'enregistrement donne la courbe d'étirement du PTA-1 sur ce piano, sans rien recopier.
+- Fichiers attendus dans un dossier Drive « Accordeur Pro – séances ». Analyse hors ligne (rejouer le WAV dans AudioProcessor, comparer) à écrire à l'arrivée des premières séances.

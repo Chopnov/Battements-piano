@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { startMicrophone, NoteTracker, Recorder, noteName, FIRST_KEY, LAST_KEY, type MicSession, type ProcessorEvent } from './dsp';
 import { Dial } from './ui/DialView';
+import { store, stockagePersistant, placeLibreMo, type SeanceMeta } from './seance/store';
+import { ficheVide, type FicheSeance } from './seance/fiche';
+import { exporterSeance, garderEcranAllume } from './seance/exporter';
+import { FicheSheet, IntervalTest, SeancesEnAttente } from './seance/SeanceUI';
 
 const VERSION = '0.2.0';
 
@@ -13,13 +17,6 @@ const CORR: Record<string, string> = {
   manuel: 'corrigé à la main',
 };
 
-function save(name: string, data: Uint8Array | string, type: string): void {
-  const blob = new Blob([data as BlobPart], { type });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = name;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-}
 
 /** Écran d'accord : détection intelligente de la note (suivi de séquence), cadran, mesure de B, enregistrement de validation. */
 export function App() {
@@ -32,7 +29,17 @@ export function App() {
   const [current, setCurrent] = useState<number | undefined>(undefined);
   const [locked, setLocked] = useState(false);
   const [pending, setPending] = useState<string>('');
-  const [rec, setRec] = useState<{ s: number; mb: number } | null>(null);
+  const [rec, setRec] = useState<{ s: number; mb: number; paused: boolean } | null>(null);
+  const [fiche, setFiche] = useState<FicheSeance>(() => ficheVide());
+  const [ficheOpen, setFicheOpen] = useState(false);
+  const [aEnvoyer, setAEnvoyer] = useState<string | null>(null);   // séance terminée, fiche à compléter puis envoi
+  const [exporting, setExporting] = useState(false);
+  const [testOpen, setTestOpen] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  const [warn, setWarn] = useState('');
+  const seanceId = useRef<string | null>(null);
+  const ecritures = useRef<Promise<void>>(Promise.resolve());
+  const libererEcran = useRef<(() => void) | null>(null);
   const [lastMs, setLastMs] = useState<number | null>(null);
   const sess = useRef<MicSession | null>(null);
   const tracker = useRef(new NoteTracker());
@@ -41,7 +48,7 @@ export function App() {
   const prevState = useRef<ProcessorEvent['state']>('silent');
 
   const clock = () => sess.current?.processor.samplesSeen ?? 0;
-  const logLine = (type: 'frappe' | 'correction' | 'reglage', data: Record<string, unknown>) => recorder.current?.note(type, clock(), data);
+  const logLine = (type: 'frappe' | 'correction' | 'reglage' | 'marque', data: Record<string, unknown>) => recorder.current?.note(type, clock(), data);
   const sync = () => { setCurrent(tracker.current.current); setLocked(tracker.current.isLocked); };
 
   function onEvent(e: ProcessorEvent) {
@@ -83,30 +90,67 @@ export function App() {
     } catch (e) { setInfo('Micro refusé ou indisponible : ' + String(e)); }
   }
 
-  function startRecording() {
+  async function startRecording() {
     const s = sess.current; if (!s) return;
-    const r = new Recorder(s.sampleRate, s.processor.samplesSeen);
+    const id = new Date().toISOString();
+    seanceId.current = id;
+    // 16 bits, blocs de 10 s stockés au fil de l'eau sur le téléphone : rien ne reste en mémoire, rien n'est perdu si l'appli s'arrête
+    const r = new Recorder(s.sampleRate, s.processor.samplesSeen, new Date(), {
+      bits: 16,
+      onChunk: (bytes, i) => { ecritures.current = ecritures.current.then(() => store.bloc(id, i, bytes, r.journal())).catch(e => setWarn('Stockage : ' + String(e))); },
+    });
+    void stockagePersistant();
+    const libre = await placeLibreMo();
+    setWarn(libre !== undefined && libre < 800 ? `Place libre faible (${libre.toFixed(0)} Mo, une heure ≈ 350 Mo).` : '');
+    await store.demarrer({ id, debut: r.startedAt.toISOString(), sampleRate: r.sampleRate, bits: r.bits, octets: 0, termine: false });
+    if (fiche.la4 !== la4) setFiche(f => ({ ...f, la4 }));
+    libererEcran.current = await garderEcranAllume();
     r.meta = {
       version: VERSION, la4, tolerance: tol, micro: s.settings, navigateur: navigator.userAgent,
       noteDepart: tracker.current.current !== undefined ? noteName(tracker.current.current) : 'auto',
       cadenas: tracker.current.isLocked, sens: tracker.current.direction,
     };
-    recorder.current = r; setRec({ s: 0, mb: 0 });
+    recorder.current = r; setRec({ s: 0, mb: 0, paused: false });
   }
 
   function stopRecording() {
+    const r = recorder.current, id = seanceId.current; if (!r || !id) return;
+    recorder.current = null; seanceId.current = null; setRec(null); setTestOpen(false);
+    libererEcran.current?.(); libererEcran.current = null;
+    const tail = r.tail(), i = r.flushedChunks;
+    ecritures.current = ecritures.current
+      .then(() => (tail.length ? store.bloc(id, i, tail) : undefined))
+      .then(() => store.maj(id, { termine: true, journal: r.journal(), fiche }))
+      .then(() => { if (r.samples < r.sampleRate * 0.5) return store.supprimer(id); setAEnvoyer(id); setFicheOpen(true); })
+      .catch(e => setWarn('Stockage : ' + String(e)))
+      .finally(() => setRefresh(x => x + 1));
+  }
+
+  function togglePause() {
     const r = recorder.current; if (!r) return;
-    recorder.current = null; setRec(null);
-    if (r.samples < r.sampleRate * 0.5) return;
-    const base = r.baseName();
-    save(base + '.wav', r.wav(), 'audio/wav');
-    save(base + '.json', r.journal(), 'application/json');
+    if (r.isPaused) r.resume(clock()); else r.pause(clock());
+    setRec(x => x && { ...x, paused: r.isPaused });
+  }
+
+  async function envoyer(id: string, f: FicheSeance | undefined) {
+    setExporting(true);
+    try {
+      const res = await exporterSeance(id, f);
+      if (res !== 'annule') { setAEnvoyer(null); setFicheOpen(false); setFiche(ff => ({ ...ficheVide(ff.la4) })); }
+    } catch (e) { setWarn('Envoi : ' + String(e)); }
+    finally { setExporting(false); setRefresh(x => x + 1); }
+  }
+
+  function envoyerAncienne(m: SeanceMeta) {
+    const f = m.fiche as FicheSeance | undefined;
+    if (f && !m.nomFichier) { setFiche(f); setAEnvoyer(m.id); setFicheOpen(true); }  // fiche à vérifier avant envoi
+    else void envoyer(m.id, f);
   }
 
   // durée de l'enregistrement en cours
   useEffect(() => {
     if (!rec) return;
-    const id = setInterval(() => { const r = recorder.current; if (r) setRec({ s: r.seconds, mb: r.bytes / 1e6 }); }, 500);
+    const id = setInterval(() => { const r = recorder.current; if (r) setRec({ s: r.seconds, mb: r.bytes / 1e6, paused: r.isPaused }); }, 500);
     return () => clearInterval(id);
   }, [rec !== null]);
 
@@ -161,10 +205,11 @@ export function App() {
 
       <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
         <button onClick={toggle} className={'rounded-lg px-4 py-2 font-semibold ' + (running ? 'bg-rose-600' : 'bg-sky-600')}>{running ? 'Arrêter' : 'Écouter'}</button>
-        <button onClick={() => (rec ? stopRecording() : startRecording())} disabled={!running}
-          className={'rounded-lg px-4 py-2 font-semibold disabled:opacity-40 ' + (rec ? 'bg-rose-700 animate-pulse' : 'bg-slate-700')}>
-          {rec ? `⏹ ${fmt(rec.s)} · ${rec.mb.toFixed(0)} Mo` : '⏺ Enregistrer'}
+        <button onClick={() => (rec ? stopRecording() : void startRecording())} disabled={!running}
+          className={'rounded-lg px-4 py-2 font-semibold disabled:opacity-40 ' + (rec ? (rec.paused ? 'bg-amber-700' : 'bg-rose-700 animate-pulse') : 'bg-slate-700')}>
+          {rec ? `⏹ ${fmt(rec.s)} · ${rec.mb.toFixed(0)} Mo` : '⏺ Enregistrer la séance'}
         </button>
+        {rec && <button onClick={togglePause} className={btn}>{rec.paused ? '▶ Reprendre' : '⏸ Pause'}</button>}
         <label>Zone juste ±
           <select value={tol} onChange={e => setTol(Number(e.target.value))} className="ml-1 rounded bg-slate-800 px-2 py-1">
             {[0.5, 1, 2, 3, 5].map(v => <option key={v} value={v}>{v} ct</option>)}
@@ -179,11 +224,29 @@ export function App() {
             }} />
         </label>
       </div>
+      {rec && (
+        <div className="mt-3 flex flex-wrap gap-2 text-sm">
+          <button className={btn} onClick={() => setFicheOpen(true)}>Fiche du piano</button>
+          <button className={btn} onClick={() => logLine('marque', { marque: 'passe de contrôle' })}>Passe de contrôle</button>
+          <button className={btn + (testOpen ? ' bg-sky-800' : '')} onClick={() => setTestOpen(!testOpen)}>Test d'octaves</button>
+        </div>
+      )}
+      {rec && testOpen && <IntervalTest courante={current} onMark={d => logLine('marque', d)} onClose={() => setTestOpen(false)} />}
+      {warn && <p className="mt-2 text-xs text-amber-300">{warn}</p>}
+      {ficheOpen && (
+        <FicheSheet fiche={fiche} onChange={f => { setFiche(f); const id = aEnvoyer ?? seanceId.current; if (id) void store.maj(id, { fiche: f }); }}
+          onClose={() => setFicheOpen(false)} exporting={exporting}
+          onExport={aEnvoyer ? () => void envoyer(aEnvoyer, fiche) : undefined} />
+      )}
+      {aEnvoyer && !ficheOpen && (
+        <button className="mt-3 w-full rounded-lg bg-sky-600 px-4 py-3 font-semibold" onClick={() => setFicheOpen(true)}>Compléter la fiche et envoyer la séance</button>
+      )}
       <p className="mt-3 text-xs text-slate-400">
         {info || 'Joue une seule corde. La note suit la séquence (même note ou voisine) ; un grand saut demande 2 frappes, 3 pour une octave. ◀ ▶ corrigent la touche, le cadenas la bloque (cadenas + flèches = mode manuel).'}
       </p>
       {lastMs !== null && <p className="mt-1 text-xs text-slate-500">Première lecture : {Math.round(lastMs)} ms après l'attaque.</p>}
-      <p className="mt-1 text-xs text-slate-500">L'enregistrement produit un WAV brut et un journal JSON (note, cents, B, corrections) à me renvoyer pour valider sur vrai piano.</p>
+      <p className="mt-1 text-xs text-slate-500">L'enregistrement garde toute la séance sur le téléphone (WAV 16 bits, ≈ 350 Mo par heure), puis l'envoie avec la fiche du piano et le journal des mesures.</p>
+      <SeancesEnAttente onExport={envoyerAncienne} refresh={refresh} />
     </main>
   );
 }
