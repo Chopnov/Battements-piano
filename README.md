@@ -14,3 +14,7 @@ Page web : https://chopnov.github.io/Battements-piano/ (Chrome Android → menu 
 - `node tools/build.js` produit `docs/index.html` (page unique servie par GitHub Pages) ; `npm test` lance les tests
 - `docs/piano/` : enregistrements, Salamander Grand Piano (Yamaha C5), Alexander Holm, CC BY 3.0
 - APK Android (facultatif) : onglet Actions → « Compiler l'APK »
+
+## Accordeur Pro (moteur DSP, étape 1)
+- Application : https://chopnov.github.io/Battements-piano/accordeur/
+- Code : `accordeur-pro/` (Vite + React + TypeScript + Tailwind ; `npm test`, `npx vite build --base=./`, copier `dist/` dans `docs/accordeur/`)
