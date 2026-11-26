@@ -78,9 +78,12 @@ function draw(ctx: CanvasRenderingContext2D, w: number, h: number, S: LiveState)
     const x0 = w / 2 - (wN + wO + ns * 0.04) / 2;
     ctx.textAlign = 'left'; ctx.fillStyle = S.frozen ? C.muted : C.fg; ctx.font = `500 ${ns}px ${FD}`; ctx.fillText(n.name, x0, ny);
     ctx.fillStyle = C.muted; ctx.font = `300 ${ns * 0.42}px ${FD}`; ctx.fillText(String(n.oct), x0 + wN + ns * 0.04, ny);
+    // numéro de touche (1 à 88)
+    ctx.textAlign = 'center'; ctx.fillStyle = C.muted; ctx.font = `500 ${Math.max(13, ns * 0.2)}px ${FB}`;
+    ctx.fillText(`touche ${S.midi - 20}`, w / 2, ny + Math.max(18, ns * 0.3));
   }
   // bande
-  const bw = w * 0.9, bx = (w - bw) / 2, bh = Math.max(34, h * 0.16), by = h * 0.45;
+  const bw = w * 0.9, bx = (w - bw) / 2, bh = Math.max(34, h * 0.16), by = h * 0.5;
   const glow = S.frozen ? 0 : Math.max(S.flash, 0.55 * S.okAnim);
   if (glow > 0.02) {
     ctx.save(); ctx.shadowColor = alpha(C.accent, 0.9 * glow); ctx.shadowBlur = 8 + 26 * glow; ctx.strokeStyle = alpha(C.accent, 0.85 * glow); ctx.lineWidth = 2;

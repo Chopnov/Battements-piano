@@ -86,10 +86,10 @@ describe('accord complet 1 → 88 avec suivi de séquence', () => {
   });
 });
 
-describe('grands sauts', () => {
+describe('grands sauts (ancien mode : confirmation en 2 ou 3 frappes)', () => {
   const base: Strike = { midi: 60, cents: 0, dur: 1.1, k1Gain: 1, gap: 0.35 };
   it('un saut A4 → C2 n’est accepté qu’à la 2e frappe (1re lecture provisoire)', () => {
-    const t = new NoteTracker(); t.setCurrent(69);
+    const t = new NoteTracker({ freeFirst: false }); t.setCurrent(69);
     const o = play([{ ...base, midi: 69 }, { ...base, midi: 36, dur: 1.6 }, { ...base, midi: 36, dur: 1.6 }, { ...base, midi: 37, dur: 1.6 }], t);
     console.log(o.map(x => `${noteName(x.strike.midi)} → ${x.final !== undefined ? noteName(x.final) : '—'}${x.tentativeFirst ? ' (provisoire)' : ''}`).join(' · '));
     expect(o[1].tentativeFirst).toBe(true);
@@ -98,7 +98,7 @@ describe('grands sauts', () => {
     expect(o[3].final).toBe(37);
   });
   it('une octave au-dessus de la note attendue demande 3 frappes', () => {
-    const t = new NoteTracker(); t.setCurrent(57);
+    const t = new NoteTracker({ freeFirst: false }); t.setCurrent(57);
     const o = play([{ ...base, midi: 57 }, { ...base, midi: 69 }, { ...base, midi: 69 }, { ...base, midi: 69 }], t);
     console.log(o.map(x => `${noteName(x.strike.midi)} → ${x.final !== undefined ? noteName(x.final) : '—'}`).join(' · '));
     expect(o[0].final).toBe(57);
@@ -120,5 +120,25 @@ describe('retour en arrière', () => {
     const o = play([base, { ...base, midi: 57, cents: -30 }, { ...base, midi: 57, cents: -5 }], t);
     expect(o.map(x => x.final)).toEqual([59, 57, 57]);
     expect(o[1].keys.every(k => k === 57)).toBe(true);
+  });
+});
+
+describe('une frappe suffit (défaut)', () => {
+  const base: Strike = { midi: 60, cents: 0, dur: 1.1, k1Gain: 1, gap: 0.35 };
+  it('saut A4 → C2 lu dès la 1re frappe, sans lecture provisoire', () => {
+    const t = new NoteTracker(); t.setCurrent(69);
+    const o = play([{ ...base, midi: 69 }, { ...base, midi: 36, dur: 1.6 }, { ...base, midi: 37, dur: 1.6 }], t);
+    expect(o[1].firstKey).toBe(36); expect(o[1].tentativeFirst).toBeFalsy(); expect(o[1].final).toBe(36);
+    expect(o[2].final).toBe(37);
+  });
+  it('octave au-dessus de la note attendue : lue dès la 1re frappe', () => {
+    const t = new NoteTracker(); t.setCurrent(57);
+    const o = play([{ ...base, midi: 57 }, { ...base, midi: 69 }], t);
+    expect(o.map(x => x.final)).toEqual([57, 69]);
+  });
+  it('grave juste après l’aigu (fenêtre agrandie en cours de frappe)', () => {
+    const t = new NoteTracker(); t.setCurrent(96);
+    const o = play([{ ...base, midi: 96, dur: 0.7 }, { ...base, midi: 26, dur: 1.6, k1Gain: 0.08 }, { ...base, midi: 90, dur: 0.7 }, { ...base, midi: 23, dur: 1.6 }], t);
+    expect(o.map(x => x.final)).toEqual([96, 26, 90, 23]);
   });
 });

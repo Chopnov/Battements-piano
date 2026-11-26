@@ -36,11 +36,17 @@ export interface TrackerConfig {
   octaveJumpStrikes: number;
   /** La détection libre doit faire mieux que la séquence d'au moins ce rapport de score pour compter comme indice de saut */
   jumpScoreRatio: number;
+  /**
+   * Une frappe suffit (défaut) : la détection libre décide de la touche à chaque fenêtre ; la séquence ne sert plus
+   * qu'à départager une hésitation d'octave (octave, douzième, double octave de la note attendue) et à appliquer
+   * glissement / continuité près de la note courante. false = ancien comportement (saut confirmé en 2 ou 3 frappes).
+   */
+  freeFirst: boolean;
 }
 
 export const DEFAULT_TRACKER: TrackerConfig = {
   startDirection: 1, tunedCents: 5, slideCents: 15, continuityCents: 35,
-  jumpStrikes: 2, octaveJumpStrikes: 3, jumpScoreRatio: 1.25,
+  jumpStrikes: 2, octaveJumpStrikes: 3, jumpScoreRatio: 1.25, freeFirst: true,
 };
 
 export type Scored = { fit: FitResult; score: number } | FitRejection | null;
@@ -148,7 +154,12 @@ export class NoteTracker {
   beginStrike(): void { this.strike = newStrike(); }
 
   /** Touche dominante de la frappe en cours (la plus attribuée par la séquence), pour la fusion des fenêtres */
-  get strikeKey(): number | undefined { return dominant(this.strike.keys) ?? this.strike.last?.midi; }
+  get strikeKey(): number | undefined {
+    if (!this.cfg.freeFirst) return dominant(this.strike.keys) ?? this.strike.last?.midi;
+    const all = new Map(this.strike.keys);
+    for (const [k, v] of this.strike.jumpVotes) all.set(k, (all.get(k) ?? 0) + v);
+    return dominant(all) ?? this.strike.last?.midi;
+  }
 
   /** Une fenêtre d'analyse : résultat guidé (autour de la séquence) et éventuellement résultat libre. */
   observe(guided: Scored, free: Scored): Attribution | null {
@@ -161,6 +172,8 @@ export class NoteTracker {
     } else if (this.locked) {
       if (!ok(guided)) return null;
       att = this.make(this.cur, guided.fit, 'cadenas', false);
+    } else if (this.cfg.freeFirst) {
+      att = this.observeFreeFirst(guided, free);
     } else {
       let g = ok(guided) ? this.attribute(guided.fit) : null;
       if (ok(free)) {
@@ -182,8 +195,25 @@ export class NoteTracker {
     if (att) {
       s.last = att; s.frames++; s.lastOf.set(att.midi, att);
       if (att.source !== 'libre') s.keys.set(att.midi, (s.keys.get(att.midi) ?? 0) + 1);
+      else if (this.cfg.freeFirst) s.jumpVotes.set(att.midi, (s.jumpVotes.get(att.midi) ?? 0) + 1);
     }
     return att;
+  }
+
+  /** Une frappe suffit : la détection libre décide, la séquence ne départage que les hésitations d'octave. */
+  private observeFreeFirst(guided: Scored, free: Scored): Attribution | null {
+    const g = ok(guided) ? this.attribute(guided.fit) : null;
+    if (!ok(free)) return g;
+    const m = this.nearest(free.fit.f0);
+    if (!g) return Math.abs(m - this.cur!) <= 2 ? this.attribute(free.fit) ?? this.make(m, free.fit, 'libre', false) : this.make(m, free.fit, 'libre', false, 'saut');
+    const d = Math.abs(m - g.midi);
+    if (d <= 2) {
+      // même zone : la détection libre explique mieux le spectre → on la préfère, avec les règles de séquence
+      return ok(guided) && free.score > this.cfg.jumpScoreRatio * guided.score && m !== g.midi ? this.attribute(free.fit) ?? g : g;
+    }
+    const octaveLike = d === 12 || d === 19 || d === 24 || d === 7 || d === 28 || d === 31;
+    const ratio = octaveLike ? this.cfg.jumpScoreRatio : 0.8;
+    return ok(guided) && free.score > ratio * guided.score ? this.make(m, free.fit, 'libre', false, 'saut') : g;
   }
 
   /** Fin de frappe (mesure figée) : met à jour la note courante, le sens, les sauts en attente. */
@@ -203,6 +233,20 @@ export class NoteTracker {
     const jumpMajority = jump !== undefined && best * 2 >= s.frames;
 
     let key = last.midi, correction = last.correction, tentative = false;
+    if (this.cfg.freeFirst && !this.locked) {
+      // touche la plus souvent attribuée sur la frappe, toutes sources confondues
+      const all = new Map<number, number>();
+      for (const [k, v] of s.keys) all.set(k, v);
+      for (const [k, v] of s.jumpVotes) all.set(k, (all.get(k) ?? 0) + v);
+      const k = dominant(all);
+      if (k !== undefined && k !== key) { last = s.lastOf.get(k) ?? last; key = k; correction = last.correction; }
+      if (this.cur !== undefined && key !== this.cur && Math.abs(key - this.cur) === 1) this.dir = key > this.cur ? 1 : -1;
+      this.cur = key; this.pending = null;
+      const f0b = final?.f0 ?? last.fit.f0, Bb = final?.B ?? last.fit.B;
+      const c = centsBetween(f0b, midiToFreq(key, this.la4));
+      this.readings.set(key, { f0: f0b, cents: c });
+      return { midi: key, name: noteName(key), cents: c, f0: f0b, B: Bb, current: key, correction, tentative: false };
+    }
     if (this.cur === undefined) {
       this.cur = key;
     } else if (!this.locked && jumpMajority && jump !== undefined) {

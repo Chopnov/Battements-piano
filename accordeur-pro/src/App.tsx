@@ -7,7 +7,7 @@ import {
   type Measures, type OctaveType,
 } from './tuning/stretch';
 
-export const VERSION = '0.3.0-essai';
+export const VERSION = '0.3.1-essai';
 
 /** Notes proposées pour la mesure rapide « médium » : un La par octave de La2 à La6. */
 const QUICK = [45, 57, 69, 81, 93];
@@ -164,7 +164,7 @@ export function App() {
               {QUICK.map(m => {
                 const v = cfg.meas[m], b = v && medianB(v), bad = b && isOutlier(profile, m, b);
                 return <span key={m} className={'rounded-md px-2 py-1 text-xs tabular-nums ' + (v ? (bad ? 'bg-[#2a1d16] text-[#ef8b5b]' : 'bg-[#16302a] text-[#74deae]') : 'bg-[#12161c] text-[#7d8795]')}>
-                  {frLabel(m)}{v ? ` · ${fmt(b! * 1000, 2)} (${v.length})` : ''}
+                  {frLabel(m)} ({m - 20}){v ? ` · ${fmt(b! * 1000, 2)} (${v.length})` : ''}
                 </span>;
               })}
             </div>
@@ -180,7 +180,7 @@ export function App() {
               </button>
             ))}
             <span className="ml-auto text-[#7d8795] tabular-nums">
-              {current != null && curDev != null ? `${frLabel(current)} visé ${curDev >= 0 ? '+' : '−'}${fmt(Math.abs(curDev))} ct` : `${nMeas} note${nMeas > 1 ? 's' : ''} mesurée${nMeas > 1 ? 's' : ''}`}
+              {current != null && curDev != null ? `${frLabel(current)} (${current - 20}) visé ${curDev >= 0 ? '+' : '−'}${fmt(Math.abs(curDev))} ct` : `${nMeas} note${nMeas > 1 ? 's' : ''} mesurée${nMeas > 1 ? 's' : ''}`}
             </span>
           </div>
         )}
