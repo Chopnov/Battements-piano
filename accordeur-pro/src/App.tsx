@@ -1,189 +1,251 @@
-import { useEffect, useRef, useState } from 'react';
-import { startMicrophone, NoteTracker, Recorder, noteName, FIRST_KEY, LAST_KEY, type MicSession, type ProcessorEvent } from './dsp';
-import { Dial } from './ui/DialView';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { startMicrophone, NoteTracker, type MicSession, type ProcessorEvent } from './dsp';
+import { Strobe, newLive, type LiveState } from './ui/Strobe';
+import { Curve } from './ui/Curve';
+import {
+  PROFILES, OCTAVES, profileB, refinedB, stretchCurve, toleranceFor, frLabel, medianB, isOutlier,
+  type Measures, type OctaveType,
+} from './tuning/stretch';
 
-const VERSION = '0.2.0';
+export const VERSION = '0.3.0-essai';
 
-interface Live { midi: number; note: string; cents: number; hz: number; B: number; tentative?: boolean; correction?: string }
+/** Notes proposées pour la mesure rapide « médium » : un La par octave de La2 à La6. */
+const QUICK = [45, 57, 69, 81, 93];
+const PRESETS_HZ = [438, 440, 441, 442, 443, 444];
 
-const CORR: Record<string, string> = {
-  glissement: 'touche suivante (note très fausse)',
-  continuite: 'même touche (passage des ±50 ct)',
-  saut: 'saut confirmé',
-  manuel: 'corrigé à la main',
-};
-
-function save(name: string, data: Uint8Array | string, type: string): void {
-  const blob = new Blob([data as BlobPart], { type });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = name;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+interface Saved { la4: number; offset: number; profile: string; oct: OctaveType; meas: Measures }
+const DEFAULTS: Saved = { la4: 440, offset: 0, profile: 'droit', oct: '4:2', meas: {} };
+const KEY = 'accordeur-pro-essai';
+function load(): Saved {
+  try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) || '{}') }; } catch { return DEFAULTS; }
 }
 
-/** Écran d'accord : détection intelligente de la note (suivi de séquence), cadran, mesure de B, enregistrement de validation. */
+const fmt = (v: number, d = 1) => v.toFixed(d).replace('.', ',');
+const pill = 'rounded-full border border-[#222a34] bg-[#12161c] px-3 py-1.5 text-[13px] font-medium whitespace-nowrap active:bg-[#1a2029]';
+const chip = 'rounded-lg border border-[#222a34] bg-[#12161c] px-3 py-2 text-sm active:bg-[#1a2029]';
+
+/** Écran d'accord de la version d'essai : stroboscope sur la courbe d'accord, courbe dessous, mesure rapide d'inharmonicité. */
 export function App() {
-  const [live, setLive] = useState<Live | null>(null);
-  const [state, setState] = useState<ProcessorEvent['state']>('silent');
-  const [info, setInfo] = useState('');
-  const [tol, setTol] = useState(2);
-  const [la4, setLa4] = useState(440);
+  const [cfg, setCfg] = useState<Saved>(load);
   const [running, setRunning] = useState(false);
-  const [current, setCurrent] = useState<number | undefined>(undefined);
-  const [locked, setLocked] = useState(false);
-  const [pending, setPending] = useState<string>('');
-  const [rec, setRec] = useState<{ s: number; mb: number } | null>(null);
-  const [lastMs, setLastMs] = useState<number | null>(null);
+  const [err, setErr] = useState('');
+  const [current, setCurrent] = useState<number | null>(null);
+  const [measuring, setMeasuring] = useState(false);
+  const [lastMeasured, setLastMeasured] = useState<number | null>(null);
+  const [sheet, setSheet] = useState<'' | 'hz' | 'piano'>('');
+  const [view, setView] = useState<'accord' | 'B'>('accord');
+
+  const live = useRef<LiveState>(newLive());
   const sess = useRef<MicSession | null>(null);
   const tracker = useRef(new NoteTracker());
-  const recorder = useRef<Recorder | null>(null);
-  const strike = useRef<{ onset: number; firstMs?: number }>({ onset: 0 });
   const prevState = useRef<ProcessorEvent['state']>('silent');
+  const wake = useRef<WakeLockSentinel | null>(null);
 
-  const clock = () => sess.current?.processor.samplesSeen ?? 0;
-  const logLine = (type: 'frappe' | 'correction' | 'reglage', data: Record<string, unknown>) => recorder.current?.note(type, clock(), data);
-  const sync = () => { setCurrent(tracker.current.current); setLocked(tracker.current.isLocked); };
+  useEffect(() => { try { localStorage.setItem(KEY, JSON.stringify(cfg)); } catch { /* stockage indisponible */ } }, [cfg]);
+
+  const profile = PROFILES.find(p => p.id === cfg.profile) ?? PROFILES[1];
+  const { B, Bp, dev } = useMemo(() => {
+    const B = refinedB(profile, cfg.meas), Bp: number[] = [];
+    for (let m = 21; m <= 108; m++) Bp[m] = profileB(profile, m);
+    return { B, Bp, dev: stretchCurve(B, cfg.oct) };
+  }, [profile, cfg.meas, cfg.oct]);
+
+  // Cible en cents de la fondamentale virtuelle (ce que mesure le moteur) : la courbe vise la 1re partielle, f1 = f0·√(1+B).
+  const target = useRef<(m: number) => number>(() => 0);
+  target.current = (m: number) => (dev[m] ?? 0) + cfg.offset - 600 * Math.log2(1 + (B[m] ?? 0));
+  const measRef = useRef(measuring); measRef.current = measuring; live.current.measuring = measuring;
+  const la4Ref = useRef(cfg.la4); la4Ref.current = cfg.la4;
 
   function onEvent(e: ProcessorEvent) {
-    if (e.committed) {
-      const c = e.committed;
-      sync();
-      setPending(c.pendingJump ? `Saut vers ${noteName(c.pendingJump.midi)} ? ${c.pendingJump.count}/${c.pendingJump.needed} frappes` : '');
-      logLine('frappe', {
-        note: c.name, midi: c.midi, cents: +c.cents.toFixed(2), f0: +c.f0.toFixed(4), B: +c.B.toExponential(3),
-        sigma: e.fused ? +e.fused.sigmaF0Cents.toFixed(3) : undefined, fenetres: e.fused?.frames,
-        premiereLecture_ms: strike.current.firstMs !== undefined ? Math.round(strike.current.firstMs) : undefined,
-        correction: c.correction, provisoire: c.tentative || undefined, sautEnAttente: c.pendingJump,
-      });
+    const S = live.current;
+    const c = e.committed;
+    if (c && measRef.current && !c.tentative && c.B > 1e-5 && c.B < 0.05) {
+      setCfg(s => ({ ...s, meas: { ...s.meas, [c.midi]: [...(s.meas[c.midi] ?? []), c.B].slice(-5) } }));
+      setLastMeasured(c.midi);
     }
-    // nouvelle frappe (après le bilan de la précédente, qui peut arriver sur le même événement)
-    if (e.state === 'attack' && (prevState.current !== 'attack' || e.rejected === 'retrigger')) strike.current = { onset: e.time };
+    const newStrike = e.state === 'attack' && (prevState.current !== 'attack' || e.rejected === 'retrigger');
     prevState.current = e.state;
-    setState(e.state);
-    if (e.state === 'silent') return;                        // on garde l'affichage figé jusqu'à la frappe suivante
-    if (e.state === 'attack' && !e.fused && !e.frame) { setLive(null); return; }
+    if (newStrike) { S.win = []; S.avg = null; }
     if (e.frame) {
-      const f = e.frame;
-      if (strike.current.firstMs === undefined) { strike.current.firstMs = (e.time - strike.current.onset) * 1000; setLastMs(strike.current.firstMs); }
-      setLive({ midi: f.note.midi, note: f.note.name, cents: f.note.cents, hz: f.fit.f0, B: f.fit.B, tentative: f.note.tentative, correction: f.note.correction });
-    } else if (e.frozenNow && e.fused) {
-      setLive(l => ({ midi: e.fused!.note.midi, note: e.fused!.note.name, cents: e.fused!.note.cents, hz: e.fused!.f0, B: e.fused!.B, tentative: l?.tentative, correction: l?.correction }));
+      const f = e.frame, midi = f.note.midi;
+      const v = f.note.cents - target.current(midi);
+      if (midi !== S.midi) { S.midi = midi; S.win = []; S.disp = v; S.ok = false; S.okTime = 0; setCurrent(midi); }
+      if (S.disp == null) S.disp = v;
+      S.meas = v; S.frozen = false; S.tol = toleranceFor(midi, la4Ref.current);
+      S.win.push([e.time, v]);
+      while (S.win.length && e.time - S.win[0][0] > 0.9) S.win.shift();
+      const vals = S.win.map(x => x[1]), avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+      S.avg = avg; S.sd = Math.sqrt(vals.reduce((a, b) => a + (b - avg) ** 2, 0) / vals.length);
+    } else if (e.state === 'silent' || e.state === 'frozen') {
+      if (S.midi != null) S.frozen = true;
     }
   }
 
-  async function toggle() {
-    if (sess.current) { if (recorder.current) stopRecording(); sess.current.stop(); sess.current = null; setRunning(false); return; }
-    try {
-      const s = await startMicrophone(onEvent, {}, x => recorder.current?.push(x));
-      s.processor.setTarget(undefined, la4);
-      s.processor.setTracker(tracker.current);
-      sess.current = s; setRunning(true);
-      const st = s.settings;
-      setInfo(`${s.sampleRate} Hz · écho ${String(st.echoCancellation)} · bruit ${String(st.noiseSuppression)} · gain auto ${String(st.autoGainControl)}`);
-    } catch (e) { setInfo('Micro refusé ou indisponible : ' + String(e)); }
+  async function keepAwake() {
+    try { wake.current = await navigator.wakeLock?.request('screen') ?? null; } catch { /* refusé : sans importance */ }
   }
-
-  function startRecording() {
-    const s = sess.current; if (!s) return;
-    const r = new Recorder(s.sampleRate, s.processor.samplesSeen);
-    r.meta = {
-      version: VERSION, la4, tolerance: tol, micro: s.settings, navigateur: navigator.userAgent,
-      noteDepart: tracker.current.current !== undefined ? noteName(tracker.current.current) : 'auto',
-      cadenas: tracker.current.isLocked, sens: tracker.current.direction,
-    };
-    recorder.current = r; setRec({ s: 0, mb: 0 });
-  }
-
-  function stopRecording() {
-    const r = recorder.current; if (!r) return;
-    recorder.current = null; setRec(null);
-    if (r.samples < r.sampleRate * 0.5) return;
-    const base = r.baseName();
-    save(base + '.wav', r.wav(), 'audio/wav');
-    save(base + '.json', r.journal(), 'application/json');
-  }
-
-  // durée de l'enregistrement en cours
   useEffect(() => {
-    if (!rec) return;
-    const id = setInterval(() => { const r = recorder.current; if (r) setRec({ s: r.seconds, mb: r.bytes / 1e6 }); }, 500);
-    return () => clearInterval(id);
-  }, [rec !== null]);
+    const vis = () => { if (document.visibilityState === 'visible' && sess.current) void keepAwake(); };
+    document.addEventListener('visibilitychange', vis);
+    return () => document.removeEventListener('visibilitychange', vis);
+  }, []);
+
+  async function start() {
+    setErr('');
+    try {
+      const s = await startMicrophone(onEvent);
+      s.processor.setTarget(undefined, cfg.la4);
+      s.processor.setTracker(tracker.current);
+      sess.current = s; setRunning(true); void keepAwake();
+    } catch (e) { setErr('Micro refusé ou indisponible. Autorise le micro pour cette page puis réessaie. (' + String(e) + ')'); }
+  }
+
+  function setLa4(v: number) {
+    v = Math.round(Math.min(470, Math.max(410, v)) * 10) / 10;
+    setCfg(s => ({ ...s, la4: v }));
+    sess.current?.processor.setTarget(undefined, v); tracker.current.setLa4(v);
+  }
 
   function nudge(d: number) {
-    const t = tracker.current;
-    if (t.current === undefined) t.setCurrent(live?.midi ?? FIRST_KEY);
-    const from = t.current!, to = t.nudge(d);
-    sync(); setPending('');
-    if (to !== undefined && live && live.midi === from && live.hz) {
-      setLive({ ...live, midi: to, note: noteName(to), cents: 1200 * Math.log2(live.hz / (la4 * Math.pow(2, (to - 69) / 12))), correction: 'manuel', tentative: false });
+    const t = tracker.current, S = live.current;
+    if (S.midi == null) return;
+    if (t.current === undefined) t.setCurrent(S.midi);
+    const to = t.nudge(d);
+    if (to !== undefined) {
+      const shift = (S.midi - to) * 100 + target.current(S.midi) - target.current(to);
+      S.midi = to; setCurrent(to);
+      if (S.disp != null) S.disp += shift;
+      if (S.meas != null) S.meas += shift;
+      S.win = S.win.map(([a, b]) => [a, b + shift]);
+      if (S.avg != null) S.avg += shift;
     }
-    logLine('correction', { type: 'manuel', de: noteName(from), vers: to !== undefined ? noteName(to) : undefined });
   }
 
-  function toggleLock() {
-    const t = tracker.current;
-    if (t.current === undefined && live) t.setCurrent(live.midi);
-    t.setLocked(!t.isLocked); sync();
-    logLine('reglage', { cadenas: t.isLocked, note: t.current !== undefined ? noteName(t.current) : undefined });
-  }
+  function clearMeasures() { setCfg(s => ({ ...s, meas: {} })); setLastMeasured(null); }
 
-  function pick(v: string) {
-    const t = tracker.current;
-    if (v === '') t.resetSequence(); else t.setCurrent(Number(v));
-    sync(); setPending('');
-    logLine('reglage', { noteCourante: v === '' ? 'auto' : noteName(Number(v)) });
-  }
-
-  const fmt = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
-  const detail = live ? ['B ' + live.B.toExponential(2), live.tentative ? 'provisoire' : '', live.correction ? CORR[live.correction] : ''].filter(Boolean).join(' · ') : undefined;
-  const btn = 'rounded-lg px-3 py-2 font-semibold bg-slate-800 active:bg-slate-700 disabled:opacity-40';
+  const nMeas = Object.keys(cfg.meas).length;
+  const doneQuick = QUICK.filter(m => cfg.meas[m]).length;
+  const curDev = current != null ? dev[current] + cfg.offset : null;
 
   return (
-    <main className="mx-auto max-w-md p-4 min-h-screen bg-slate-950 text-slate-100">
-      <h1 className="text-lg font-semibold">Accordeur Pro</h1>
-      <div className="mt-3">
-        <Dial note={live ? live.note + (live.tentative ? ' ?' : '') : null} cents={live?.cents ?? null} hz={live?.hz} tolerance={tol}
-          detail={detail} frozen={state === 'frozen'} />
-      </div>
-
-      <div className="mt-3 flex items-center justify-center gap-2 text-sm">
-        <button className={btn + ' text-lg w-12'} onClick={() => nudge(-1)} aria-label="Demi-ton plus bas">◀</button>
-        <select value={current ?? ''} onChange={e => pick(e.target.value)} className="rounded bg-slate-800 px-2 py-2 w-28 text-center font-semibold">
-          <option value="">Auto</option>
-          {Array.from({ length: LAST_KEY - FIRST_KEY + 1 }, (_, i) => FIRST_KEY + i).map(m => <option key={m} value={m}>{noteName(m)} ({m - FIRST_KEY + 1})</option>)}
-        </select>
-        <button className={btn + ' text-lg w-12'} onClick={() => nudge(1)} aria-label="Demi-ton plus haut">▶</button>
-        <button className={'rounded-lg px-3 py-2 font-semibold ' + (locked ? 'bg-amber-500 text-slate-950' : 'bg-slate-800')} onClick={toggleLock}
-          aria-pressed={locked}>{locked ? '🔒 Cadenas' : '🔓 Cadenas'}</button>
-      </div>
-      <p className="mt-1 h-5 text-center text-xs text-amber-300">{pending}</p>
-
-      <div className="mt-3 flex flex-wrap items-center gap-3 text-sm">
-        <button onClick={toggle} className={'rounded-lg px-4 py-2 font-semibold ' + (running ? 'bg-rose-600' : 'bg-sky-600')}>{running ? 'Arrêter' : 'Écouter'}</button>
-        <button onClick={() => (rec ? stopRecording() : startRecording())} disabled={!running}
-          className={'rounded-lg px-4 py-2 font-semibold disabled:opacity-40 ' + (rec ? 'bg-rose-700 animate-pulse' : 'bg-slate-700')}>
-          {rec ? `⏹ ${fmt(rec.s)} · ${rec.mb.toFixed(0)} Mo` : '⏺ Enregistrer'}
+    <main className="mx-auto flex h-dvh max-w-xl flex-col select-none bg-[#0b0e12] text-[#e8edf3]" style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
+      <header className="flex items-center gap-2 px-4 pt-3">
+        <button className={pill} onClick={() => setSheet('hz')}>
+          La {fmt(cfg.la4)} Hz{cfg.offset ? <span className="text-[#7d8795]"> · {cfg.offset > 0 ? '+' : '−'}{Math.abs(cfg.offset)} ct</span> : null}
         </button>
-        <label>Zone juste ±
-          <select value={tol} onChange={e => setTol(Number(e.target.value))} className="ml-1 rounded bg-slate-800 px-2 py-1">
-            {[0.5, 1, 2, 3, 5].map(v => <option key={v} value={v}>{v} ct</option>)}
-          </select>
-        </label>
-        <label>La4
-          <input type="number" value={la4} min={410} max={470} step={0.5} className="ml-1 w-20 rounded bg-slate-800 px-2 py-1"
-            onChange={e => {
-              const v = Number(e.target.value); setLa4(v);
-              sess.current?.processor.setTarget(undefined, v); tracker.current.setLa4(v);
-              logLine('reglage', { la4: v });
-            }} />
-        </label>
-      </div>
-      <p className="mt-3 text-xs text-slate-400">
-        {info || 'Joue une seule corde. La note suit la séquence (même note ou voisine) ; un grand saut demande 2 frappes, 3 pour une octave. ◀ ▶ corrigent la touche, le cadenas la bloque (cadenas + flèches = mode manuel).'}
-      </p>
-      {lastMs !== null && <p className="mt-1 text-xs text-slate-500">Première lecture : {Math.round(lastMs)} ms après l'attaque.</p>}
-      <p className="mt-1 text-xs text-slate-500">L'enregistrement produit un WAV brut et un journal JSON (note, cents, B, corrections) à me renvoyer pour valider sur vrai piano.</p>
+        <button className={pill + ' min-w-0 truncate'} onClick={() => setSheet('piano')}>
+          {profile.label} · {OCTAVES.find(o => o.id === cfg.oct)!.label}
+        </button>
+        <button className={pill + ' ml-auto ' + (measuring ? '!bg-[#74deae] !text-[#0b0e12] !border-[#74deae]' : '')} onClick={() => setMeasuring(m => !m)}>
+          {measuring ? 'Mesure…' : 'Mesurer B'}
+        </button>
+      </header>
+
+      <section className="relative min-h-[240px] flex-[1.25]">
+        <Strobe live={live} />
+        {current != null && <>
+          <button aria-label="Demi-ton plus bas" onClick={() => nudge(-1)} className="absolute left-2 top-[14%] h-16 w-14 text-3xl text-[#3a4450] active:text-[#e8edf3]">‹</button>
+          <button aria-label="Demi-ton plus haut" onClick={() => nudge(1)} className="absolute right-2 top-[14%] h-16 w-14 text-3xl text-[#3a4450] active:text-[#e8edf3]">›</button>
+        </>}
+        {!running && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#0b0e12]/85 px-6 text-center">
+            <button onClick={start} className="rounded-full bg-[#74deae] px-8 py-4 text-lg font-semibold text-[#0b0e12] active:opacity-80">Écouter</button>
+            <p className="text-sm text-[#7d8795]">Une corde à la fois, bande de feutre en place.</p>
+            {err && <p className="text-sm text-[#ef8b5b]">{err}</p>}
+          </div>
+        )}
+      </section>
+
+      <section className="flex-1 px-4 pb-3">
+        {measuring ? (
+          <div className="mb-2">
+            <p className="text-sm">Joue chaque note proposée <b>2 fois</b>, forte, laisse sonner 2 s. {doneQuick}/{QUICK.length}</p>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {QUICK.map(m => {
+                const v = cfg.meas[m], b = v && medianB(v), bad = b && isOutlier(profile, m, b);
+                return <span key={m} className={'rounded-md px-2 py-1 text-xs tabular-nums ' + (v ? (bad ? 'bg-[#2a1d16] text-[#ef8b5b]' : 'bg-[#16302a] text-[#74deae]') : 'bg-[#12161c] text-[#7d8795]')}>
+                  {frLabel(m)}{v ? ` · ${fmt(b! * 1000, 2)} (${v.length})` : ''}
+                </span>;
+              })}
+            </div>
+            <p className="mt-1.5 h-4 text-xs text-[#7d8795]">
+              {lastMeasured != null && cfg.meas[lastMeasured] ? `${frLabel(lastMeasured)} : B = ${fmt(medianB(cfg.meas[lastMeasured]) * 1000, 2)}×10⁻³ · d'autres notes affinent aussi` : 'Toute autre note jouée est aussi prise en compte.'}
+            </p>
+          </div>
+        ) : (
+          <div className="mb-1 flex items-center gap-3 text-xs">
+            {(['accord', 'B'] as const).map(v => (
+              <button key={v} onClick={() => setView(v)} className={'py-1 ' + (view === v ? 'text-[#e8edf3] border-b border-[#74deae]' : 'text-[#7d8795]')}>
+                {v === 'accord' ? "Courbe d'accord" : 'Inharmonicité'}
+              </button>
+            ))}
+            <span className="ml-auto text-[#7d8795] tabular-nums">
+              {current != null && curDev != null ? `${frLabel(current)} visé ${curDev >= 0 ? '+' : '−'}${fmt(Math.abs(curDev))} ct` : `${nMeas} note${nMeas > 1 ? 's' : ''} mesurée${nMeas > 1 ? 's' : ''}`}
+            </span>
+          </div>
+        )}
+        <Curve view={measuring ? 'B' : view} dev={dev.map(d => d + cfg.offset)} B={B} profileB={Bp} profile={profile} meas={cfg.meas}
+          current={current} suggested={measuring ? QUICK : []} />
+        {measuring && (
+          <div className="mt-2 flex gap-2">
+            <button className={chip} onClick={() => setMeasuring(false)}>Terminé</button>
+            <button className={chip + ' text-[#7d8795]'} onClick={clearMeasures} disabled={!nMeas}>Effacer les mesures</button>
+          </div>
+        )}
+      </section>
+
+      {sheet && <div className="fixed inset-0 bg-black/50" onClick={() => setSheet('')} />}
+      {sheet === 'hz' && (
+        <div className="fixed inset-x-0 bottom-0 mx-auto max-w-xl rounded-t-2xl border-t border-[#222a34] bg-[#12161c] p-4 pb-8">
+          <h3 className="mb-3 font-semibold">Diapason</h3>
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-[#7d8795]">La4</span>
+            <span className="flex items-center gap-2">
+              <button className={chip + ' w-11'} onClick={() => setLa4(cfg.la4 - 0.1)}>−</button>
+              <output className="w-24 text-center tabular-nums">{fmt(cfg.la4)} Hz</output>
+              <button className={chip + ' w-11'} onClick={() => setLa4(cfg.la4 + 0.1)}>+</button>
+            </span>
+          </div>
+          <div className="mt-3 grid grid-cols-6 gap-1.5">
+            {PRESETS_HZ.map(h => <button key={h} className={chip + ' px-0 ' + (cfg.la4 === h ? '!border-[#74deae] text-[#74deae]' : '')} onClick={() => setLa4(h)}>{h}</button>)}
+          </div>
+          <div className="mt-4 flex items-center justify-between">
+            <span className="text-sm text-[#7d8795]">Décalage global</span>
+            <span className="flex items-center gap-2">
+              <button className={chip + ' w-11'} onClick={() => setCfg(s => ({ ...s, offset: s.offset - 1 }))}>−</button>
+              <output className="w-24 text-center tabular-nums">{cfg.offset > 0 ? '+' : cfg.offset < 0 ? '−' : ''}{Math.abs(cfg.offset)} ct</output>
+              <button className={chip + ' w-11'} onClick={() => setCfg(s => ({ ...s, offset: s.offset + 1 }))}>+</button>
+            </span>
+          </div>
+          <p className="mt-3 text-xs text-[#7d8795]">Pas de 0,1 Hz et de 1 ct. Le décalage s'ajoute à toute la courbe d'accord.</p>
+        </div>
+      )}
+      {sheet === 'piano' && (
+        <div className="fixed inset-x-0 bottom-0 mx-auto max-h-[85dvh] max-w-xl overflow-y-auto rounded-t-2xl border-t border-[#222a34] bg-[#12161c] p-4 pb-8">
+          <h3 className="mb-2 font-semibold">Type de piano</h3>
+          <div className="grid grid-cols-2 gap-1.5">
+            {PROFILES.map(p => (
+              <button key={p.id} onClick={() => setCfg(s => ({ ...s, profile: p.id }))}
+                className={chip + ' text-left ' + (p.id === profile.id ? '!border-[#74deae]' : '')}>
+                {p.label}<span className="block text-xs text-[#7d8795]">{p.sub}</span>
+              </button>
+            ))}
+          </div>
+          <h3 className="mb-2 mt-4 font-semibold">Octaves</h3>
+          <div className="grid grid-cols-4 gap-1.5">
+            {OCTAVES.map(o => (
+              <button key={o.id} onClick={() => setCfg(s => ({ ...s, oct: o.id }))}
+                className={chip + ' px-1 ' + (o.id === cfg.oct ? '!border-[#74deae] text-[#74deae]' : '')}>{o.label}</button>
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-[#7d8795]">{OCTAVES.find(o => o.id === cfg.oct)!.sub}</p>
+          <div className="mt-4 flex items-center justify-between gap-2">
+            <p className="text-xs text-[#7d8795]">{nMeas} note{nMeas > 1 ? 's' : ''} mesurée{nMeas > 1 ? 's' : ''} sur ce piano. À effacer en changeant de piano.</p>
+            <button className={chip + ' shrink-0'} onClick={clearMeasures} disabled={!nMeas}>Nouveau piano</button>
+          </div>
+          <p className="mt-4 text-[11px] text-[#3a4450]">Accordeur Pro {VERSION}</p>
+        </div>
+      )}
     </main>
   );
 }
