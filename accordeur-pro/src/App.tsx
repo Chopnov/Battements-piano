@@ -7,17 +7,22 @@ import {
   type Measures, type OctaveType,
 } from './tuning/stretch';
 
-export const VERSION = '0.3.1-essai';
+export const VERSION = '0.3.2-essai';
 
 /** Notes proposées pour la mesure rapide « médium » : un La par octave de La2 à La6. */
 const QUICK = [45, 57, 69, 81, 93];
 const PRESETS_HZ = [438, 440, 441, 442, 443, 444];
 
-interface Saved { la4: number; offset: number; profile: string; oct: OctaveType; meas: Measures }
-const DEFAULTS: Saved = { la4: 440, offset: 0, profile: 'droit', oct: '4:2', meas: {} };
+interface Saved { v?: number; la4: number; offset: number; profile: string; oct: OctaveType; meas: Measures }
+// octaves mixtes par défaut : en 4:2 les octaves des basses sortaient trop serrées au premier essai
+const DEFAULTS: Saved = { v: 2, la4: 440, offset: 0, profile: 'droit', oct: 'mixte', meas: {} };
 const KEY = 'accordeur-pro-essai';
 function load(): Saved {
-  try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(KEY) || '{}') }; } catch { return DEFAULTS; }
+  try {
+    const s = JSON.parse(localStorage.getItem(KEY) || '{}');
+    if (s.v !== 2) { s.v = 2; s.oct = DEFAULTS.oct; }   // réglages de la 1re version : on repasse en mixte
+    return { ...DEFAULTS, ...s };
+  } catch { return DEFAULTS; }
 }
 
 const fmt = (v: number, d = 1) => v.toFixed(d).replace('.', ',');
@@ -59,9 +64,10 @@ export function App() {
   function onEvent(e: ProcessorEvent) {
     const S = live.current;
     const c = e.committed;
-    if (c && measRef.current && !c.tentative && c.B > 1e-5 && c.B < 0.05) {
+    // B appris sur chaque note jouée (pas seulement en mode mesure) : la courbe colle au piano au fil de l'accord
+    if (c && !c.tentative && c.B > 1e-5 && c.B < 0.05) {
       setCfg(s => ({ ...s, meas: { ...s.meas, [c.midi]: [...(s.meas[c.midi] ?? []), c.B].slice(-5) } }));
-      setLastMeasured(c.midi);
+      if (measRef.current) setLastMeasured(c.midi);
     }
     const newStrike = e.state === 'attack' && (prevState.current !== 'attack' || e.rejected === 'retrigger');
     prevState.current = e.state;
@@ -73,7 +79,7 @@ export function App() {
       if (S.disp == null) S.disp = v;
       S.meas = v; S.frozen = false; S.tol = toleranceFor(midi, la4Ref.current);
       S.win.push([e.time, v]);
-      while (S.win.length && e.time - S.win[0][0] > 0.9) S.win.shift();
+      while (S.win.length && e.time - S.win[0][0] > 0.5) S.win.shift();
       const vals = S.win.map(x => x[1]), avg = vals.reduce((a, b) => a + b, 0) / vals.length;
       S.avg = avg; S.sd = Math.sqrt(vals.reduce((a, b) => a + (b - avg) ** 2, 0) / vals.length);
     } else if (e.state === 'silent' || e.state === 'frozen') {

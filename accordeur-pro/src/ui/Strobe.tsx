@@ -8,7 +8,7 @@ export interface LiveState {
   meas: number | null;
   /** Lecture lissée affichée */
   disp: number | null;
-  /** Fenêtre de 0,9 s : [temps audio, cents] */
+  /** Fenêtre de 0,5 s : [temps audio, cents] */
   win: [number, number][];
   avg: number | null;
   sd: number;
@@ -37,20 +37,29 @@ const fmt = (v: number, d: number) => v.toFixed(d).replace('.', ',');
 const centsText = (c: number) => { const a = Math.abs(c); return (a < 0.05 ? '' : c > 0 ? '+' : '−') + (a < 10 ? fmt(a, 1) : fmt(a, 0)) + ' ct'; };
 const prox = (c: number, t: number) => { const W = 8 * t; return Math.max(0, Math.min(1, (W - Math.abs(c)) / (W - t))); };
 
+/**
+ * Vitesse de défilement (px/s) : très sensible près du juste (40 px/s par cent jusqu'à 3 ct, un demi-cent se voit),
+ * puis moins raide pour garder les gros écarts lisibles, plafonnée à 500 px/s.
+ */
+export function strobeSpeed(c: number): number {
+  const a = Math.abs(c), v = a <= 3 ? 40 * a : 120 + 20 * (a - 3);
+  return Math.sign(c) * Math.min(500, v);
+}
+
 /** Avance l'état d'un pas dt (s) : lissage, juste avec hystérésis (entrée ±tol, sortie ±1,6 tol), défilement. */
 function step(S: LiveState, dt: number) {
-  if (S.meas != null && S.disp != null && !S.frozen) S.disp += (S.meas - S.disp) * (1 - Math.exp(-dt / 0.12));
+  if (S.meas != null && S.disp != null && !S.frozen) S.disp += (S.meas - S.disp) * (1 - Math.exp(-dt / 0.05));
   const wasOk = S.ok, T = S.tol, m = S.avg;
   if (S.measuring || m == null) { S.ok = false; S.okTime = 0; }
   else if (!S.frozen) {
-    const hold = S.midi != null && S.midi >= 91 ? 0.12 : 0.35;      // aigus : on accorde sur l'attaque
+    const hold = S.midi != null && S.midi >= 91 ? 0.08 : 0.2;      // aigus : on accorde sur l'attaque
     if (!S.ok) { S.okTime = Math.abs(m) <= T ? S.okTime + dt : 0; S.ok = S.okTime >= hold; }
     else if (Math.abs(m) > 1.6 * T) { S.ok = false; S.okTime = 0; }
   }
   if (S.ok && !wasOk) { S.flash = 1; navigator.vibrate?.(25); }
   S.okAnim += ((S.ok ? 1 : 0) - S.okAnim) * (1 - Math.exp(-dt / 0.12));
   S.flash *= Math.exp(-dt / 0.45);
-  if (S.disp != null && !S.frozen) S.off += Math.max(-50, Math.min(50, S.disp)) * 5.2 * dt * (S.ok ? 0.6 : 1);
+  if (S.disp != null && !S.frozen) S.off += strobeSpeed(S.disp) * dt;
 }
 
 function band(ctx: CanvasRenderingContext2D, x: number, y: number, bw: number, bh: number, off: number, period: number, col: string) {

@@ -110,7 +110,7 @@ export class AudioProcessor {
     this.plan = this.tracker.plan();
     if (!this.cfg.adaptiveWindow) return;
     this.size = windowForMidi(this.plan.windowMidi);
-    this.hop = this.size / 8;
+    this.hop = Math.round(this.size / 12);
   }
 
   /** Touche la plus proche de f0 (tempérament égal) et écart en cents. */
@@ -275,7 +275,7 @@ export class AudioProcessor {
     const att = t.observe(guided, free);
     if (!att && t.cfg.freeFirst && cfg.adaptiveWindow && this.size < 16384 && ++this.freeMisses >= 2) {
       // rien de reconnu avec une petite fenêtre : peut-être une note grave après l'aigu → grande fenêtre
-      this.size = Math.min(16384, this.size * 2); this.hop = this.size / 8; this.freeMisses = 0;
+      this.size = Math.min(16384, this.size * 2); this.hop = Math.round(this.size / 12); this.freeMisses = 0;
     }
     if (!att) {
       const r = (guided && 'rejected' in guided ? guided : free && 'rejected' in free ? free : { rejected: 'low-coherence' as const });
@@ -284,7 +284,7 @@ export class AudioProcessor {
     const fit = att.fit;
     // note plus grave que prévu (grand saut vers les basses) : on agrandit la fenêtre pour les fenêtres suivantes
     if (this.cfg.adaptiveWindow && windowForMidi(att.midi) > this.size && windowForMidi(att.midi) <= this.ring.length) {
-      this.size = windowForMidi(att.midi); this.hop = this.size / 8;
+      this.size = windowForMidi(att.midi); this.hop = Math.round(this.size / 12);
     }
     this.lastNote = { midi: att.midi, name: att.name, cents: att.cents, tentative: att.tentative, correction: att.correction };
     // la touche peut varier en cours de frappe : la fusion ne garde que les fenêtres de la touche dominante (voir fuse)
