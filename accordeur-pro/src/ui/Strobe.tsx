@@ -21,11 +21,15 @@ export interface LiveState {
   off: number;
   /** Note tenue sous le micro en mode mesure (pas de juste/faux) */
   measuring: boolean;
+  /** Ce sur quoi la note est visée (« octave 6:3 sur La3 », « partition La3–La4 », « courbe ») */
+  refLabel: string;
+  /** Fenêtre parallèle de f0 virtuelles (Hz) pour mémoriser la note telle qu'elle a été laissée */
+  winF: [number, number][];
 }
 
 export const newLive = (): LiveState => ({
   midi: null, meas: null, disp: null, win: [], avg: null, sd: 0, frozen: false, tol: 1,
-  ok: false, okTime: 0, okAnim: 0, flash: 0, off: 0, measuring: false,
+  ok: false, okTime: 0, okAnim: 0, flash: 0, off: 0, measuring: false, refLabel: '', winF: [],
 });
 
 const C = { bg: '#0b0e12', surface: '#12161c', line: '#222a34', fg: '#e8edf3', muted: '#7d8795', dim: '#3a4450', accent: '#74deae' };
@@ -90,9 +94,10 @@ function draw(ctx: CanvasRenderingContext2D, w: number, h: number, S: LiveState)
     // numéro de touche (1 à 88)
     ctx.textAlign = 'center'; ctx.fillStyle = C.muted; ctx.font = `500 ${Math.max(13, ns * 0.2)}px ${FB}`;
     ctx.fillText(`touche ${S.midi - 20}`, w / 2, ny + Math.max(18, ns * 0.3));
+    if (S.refLabel) { ctx.fillStyle = C.dim; ctx.font = `400 ${Math.max(12, ns * 0.16)}px ${FB}`; ctx.fillText(S.refLabel, w / 2, ny + Math.max(34, ns * 0.52)); }
   }
   // bande
-  const bw = w * 0.9, bx = (w - bw) / 2, bh = Math.max(34, h * 0.16), by = h * 0.5;
+  const bw = w * 0.9, bx = (w - bw) / 2, bh = Math.max(34, h * 0.16), by = h * 0.54;
   const glow = S.frozen ? 0 : Math.max(S.flash, 0.55 * S.okAnim);
   if (glow > 0.02) {
     ctx.save(); ctx.shadowColor = alpha(C.accent, 0.9 * glow); ctx.shadowBlur = 8 + 26 * glow; ctx.strokeStyle = alpha(C.accent, 0.85 * glow); ctx.lineWidth = 2;

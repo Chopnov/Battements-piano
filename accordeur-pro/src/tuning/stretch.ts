@@ -17,7 +17,7 @@ export const PROFILES: PianoProfile[] = [
 
 export type OctaveType = 'mixte' | '2:1' | '4:2' | '6:3';
 export const OCTAVES: { id: OctaveType; label: string; sub: string }[] = [
-  { id: 'mixte', label: 'Mixte', sub: '6:3 dans les graves, 4:2 ailleurs' },
+  { id: 'mixte', label: 'Mixte', sub: '6:3 sous le Do3, 4:2 au-dessus' },
   { id: '2:1', label: '2:1', sub: 'octaves serrées' },
   { id: '4:2', label: '4:2', sub: 'standard' },
   { id: '6:3', label: '6:3', sub: 'octaves larges' },

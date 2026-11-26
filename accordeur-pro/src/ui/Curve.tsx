@@ -10,13 +10,15 @@ interface Props {
   current: number | null;
   /** Touches proposées pour la mesure (anneaux) */
   suggested?: number[];
+  /** Notes accordées : écart réel de leur 1re partielle au tempérament égal (cents) */
+  tunedDev?: Record<string, number>;
 }
 
 const W = 340, H = 150, L = 30, R = 8, T = 10, Bt = 22;
 const X = (m: number) => L + ((m - 21) / 87) * (W - L - R);
 
 /** Courbe d'accord (Railsback : écart au tempérament égal) ou B en échelle linéaire, avec les notes mesurées. */
-export function Curve({ view, dev, B, profileB, profile, meas, current, suggested = [] }: Props) {
+export function Curve({ view, dev, B, profileB, profile, meas, current, suggested = [], tunedDev = {} }: Props) {
   const keys = Array.from({ length: 88 }, (_, i) => 21 + i);
   const measured = Object.entries(meas).map(([m, v]) => ({ m: Number(m), B: medianB(v) }));
   let ys: number[], lo: number, hi: number, ticks: number[], unit: string;
@@ -55,12 +57,15 @@ export function Curve({ view, dev, B, profileB, profile, meas, current, suggeste
       {suggested.filter(m => !meas[m]).map(m => (
         <circle key={'s' + m} cx={X(m)} cy={yOf(m, B[m])} r={4} fill="none" stroke="#7d8795" strokeWidth={1.2} />
       ))}
-      {measured.map(p => {
+      {view === 'B' && measured.map(p => {
         const bad = isOutlier(profile, p.m, p.B);
         return <circle key={p.m} cx={X(p.m)} cy={yOf(p.m, p.B)} r={3.4} fill={bad ? 'none' : '#74deae'} stroke={bad ? '#ef8b5b' : 'none'} strokeWidth={1.4}>
           <title>{frLabel(p.m)} · B {(p.B * 1000).toFixed(2)}×10⁻³{bad ? ' · douteuse, écartée' : ''}</title>
         </circle>;
       })}
+      {view === 'accord' && Object.entries(tunedDev).map(([m, c]) => (
+        <circle key={'t' + m} cx={X(Number(m))} cy={Y(Math.max(lo, Math.min(hi, c)))} r={2.2} fill="#e8edf3" />
+      ))}
       {current != null && <line x1={X(current)} x2={X(current)} y1={T} y2={H - Bt} stroke="#74deae" strokeOpacity={0.5} />}
     </svg>
   );

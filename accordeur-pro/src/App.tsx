@@ -6,16 +6,17 @@ import {
   PROFILES, OCTAVES, profileB, refinedB, stretchCurve, toleranceFor, frLabel, medianB, isOutlier,
   type Measures, type OctaveType,
 } from './tuning/stretch';
+import { planFor, centsFromPlan, planLabel, partial, type Tuned } from './tuning/reference';
 
-export const VERSION = '0.3.2-essai';
+export const VERSION = '0.4.0-essai';
 
 /** Notes proposées pour la mesure rapide « médium » : un La par octave de La2 à La6. */
 const QUICK = [45, 57, 69, 81, 93];
 const PRESETS_HZ = [438, 440, 441, 442, 443, 444];
 
-interface Saved { v?: number; la4: number; offset: number; profile: string; oct: OctaveType; meas: Measures }
+interface Saved { v?: number; la4: number; offset: number; profile: string; oct: OctaveType; meas: Measures; tuned: Tuned }
 // octaves mixtes par défaut : en 4:2 les octaves des basses sortaient trop serrées au premier essai
-const DEFAULTS: Saved = { v: 2, la4: 440, offset: 0, profile: 'droit', oct: 'mixte', meas: {} };
+const DEFAULTS: Saved = { v: 2, la4: 440, offset: 0, profile: 'droit', oct: 'mixte', meas: {}, tuned: {} };
 const KEY = 'accordeur-pro-essai';
 function load(): Saved {
   try {
@@ -60,6 +61,8 @@ export function App() {
   target.current = (m: number) => (dev[m] ?? 0) + cfg.offset - 600 * Math.log2(1 + (B[m] ?? 0));
   const measRef = useRef(measuring); measRef.current = measuring; live.current.measuring = measuring;
   const la4Ref = useRef(cfg.la4); la4Ref.current = cfg.la4;
+  const tunedRef = useRef(cfg.tuned); tunedRef.current = cfg.tuned;
+  const octRef = useRef(cfg.oct); octRef.current = cfg.oct;
 
   function onEvent(e: ProcessorEvent) {
     const S = live.current;
@@ -69,17 +72,32 @@ export function App() {
       setCfg(s => ({ ...s, meas: { ...s.meas, [c.midi]: [...(s.meas[c.midi] ?? []), c.B].slice(-5) } }));
       if (measRef.current) setLastMeasured(c.midi);
     }
+    // note laissée juste : on la mémorise telle qu'elle sonne (f0 des 0,5 dernières s, B de la frappe) pour viser les suivantes
+    // une note déjà en mémoire est remplacée à chaque frappe (le piano bouge pendant l'accord) ; une nouvelle note entre en mémoire quand elle est juste
+    const known = c ? tunedRef.current[c.midi] !== undefined : false;
+    if (c && !measRef.current && c.midi === S.midi && S.winF.length >= 3 && S.avg != null && (known || S.ok || Math.abs(S.avg) <= S.tol)) {
+      const f0 = Math.exp(S.winF.reduce((a, x) => a + Math.log(x[1]), 0) / S.winF.length);
+      setCfg(s => ({ ...s, tuned: { ...s.tuned, [c.midi]: { f0, B: c.B } } }));
+    }
     const newStrike = e.state === 'attack' && (prevState.current !== 'attack' || e.rejected === 'retrigger');
     prevState.current = e.state;
-    if (newStrike) { S.win = []; S.avg = null; }
+    if (newStrike) { S.win = []; S.winF = []; S.avg = null; }
     if (e.frame) {
       const f = e.frame, midi = f.note.midi;
-      const v = f.note.cents - target.current(midi);
-      if (midi !== S.midi) { S.midi = midi; S.win = []; S.disp = v; S.ok = false; S.okTime = 0; setCurrent(midi); }
+      const plan = planFor(midi, tunedRef.current, octRef.current);
+      const fromRef = centsFromPlan(plan, midi, tunedRef.current, f.fit.f0, e.fused?.B ?? f.fit.B, f.fit.partials);
+      const v = fromRef ?? f.note.cents - target.current(midi);
+      // note déjà accordée rejouée : écart à sa valeur en mémoire (a-t-elle bougé ?)
+      const mem = tunedRef.current[midi];
+      const drift = mem ? 1200 * Math.log2(f.fit.f0 / mem.f0) : 0;
+      S.refLabel = planLabel(plan) + (mem && Math.abs(drift) > toleranceFor(midi, la4Ref.current) ? ` · a bougé de ${drift > 0 ? '+' : '−'}${fmt(Math.abs(drift))} ct` : '');
+      if (midi !== S.midi) { S.midi = midi; S.win = []; S.winF = []; S.disp = v; S.ok = false; S.okTime = 0; setCurrent(midi); }
       if (S.disp == null) S.disp = v;
       S.meas = v; S.frozen = false; S.tol = toleranceFor(midi, la4Ref.current);
       S.win.push([e.time, v]);
       while (S.win.length && e.time - S.win[0][0] > 0.5) S.win.shift();
+      S.winF.push([e.time, f.fit.f0]);
+      while (S.winF.length && e.time - S.winF[0][0] > 0.5) S.winF.shift();
       const vals = S.win.map(x => x[1]), avg = vals.reduce((a, b) => a + b, 0) / vals.length;
       S.avg = avg; S.sd = Math.sqrt(vals.reduce((a, b) => a + (b - avg) ** 2, 0) / vals.length);
     } else if (e.state === 'silent' || e.state === 'frozen') {
@@ -118,18 +136,16 @@ export function App() {
     if (t.current === undefined) t.setCurrent(S.midi);
     const to = t.nudge(d);
     if (to !== undefined) {
-      const shift = (S.midi - to) * 100 + target.current(S.midi) - target.current(to);
-      S.midi = to; setCurrent(to);
-      if (S.disp != null) S.disp += shift;
-      if (S.meas != null) S.meas += shift;
-      S.win = S.win.map(([a, b]) => [a, b + shift]);
-      if (S.avg != null) S.avg += shift;
+      // la lecture repart à la fenêtre suivante, attribuée à la bonne touche
+      S.midi = to; setCurrent(to); S.win = []; S.winF = []; S.avg = null; S.disp = null; S.meas = null;
     }
   }
 
   function clearMeasures() { setCfg(s => ({ ...s, meas: {} })); setLastMeasured(null); }
+  function newPiano() { setCfg(s => ({ ...s, meas: {}, tuned: {} })); setLastMeasured(null); }
 
-  const nMeas = Object.keys(cfg.meas).length;
+  const nMeas = Object.keys(cfg.meas).length, nTuned = Object.keys(cfg.tuned).length;
+  const tunedDev = useMemo(() => Object.fromEntries(Object.entries(cfg.tuned).map(([m, n]) => [m, 1200 * Math.log2(partial(n, 1) / (cfg.la4 * Math.pow(2, (Number(m) - 69) / 12)))])), [cfg.tuned, cfg.la4]);
   const doneQuick = QUICK.filter(m => cfg.meas[m]).length;
   const curDev = current != null ? dev[current] + cfg.offset : null;
 
@@ -186,11 +202,11 @@ export function App() {
               </button>
             ))}
             <span className="ml-auto text-[#7d8795] tabular-nums">
-              {current != null && curDev != null ? `${frLabel(current)} (${current - 20}) visé ${curDev >= 0 ? '+' : '−'}${fmt(Math.abs(curDev))} ct` : `${nMeas} note${nMeas > 1 ? 's' : ''} mesurée${nMeas > 1 ? 's' : ''}`}
+              {nTuned ? `${nTuned} note${nTuned > 1 ? 's' : ''} accordée${nTuned > 1 ? 's' : ''} en mémoire` : current != null && curDev != null ? `${frLabel(current)} (${current - 20}) visé ${curDev >= 0 ? '+' : '−'}${fmt(Math.abs(curDev))} ct` : 'Commence par le La4'}
             </span>
           </div>
         )}
-        <Curve view={measuring ? 'B' : view} dev={dev.map(d => d + cfg.offset)} B={B} profileB={Bp} profile={profile} meas={cfg.meas}
+        <Curve view={measuring ? 'B' : view} dev={dev.map(d => d + cfg.offset)} B={B} profileB={Bp} profile={profile} meas={cfg.meas} tunedDev={tunedDev}
           current={current} suggested={measuring ? QUICK : []} />
         {measuring && (
           <div className="mt-2 flex gap-2">
@@ -244,10 +260,10 @@ export function App() {
                 className={chip + ' px-1 ' + (o.id === cfg.oct ? '!border-[#74deae] text-[#74deae]' : '')}>{o.label}</button>
             ))}
           </div>
-          <p className="mt-1 text-xs text-[#7d8795]">{OCTAVES.find(o => o.id === cfg.oct)!.sub}</p>
+          <p className="mt-1 text-xs text-[#7d8795]">{OCTAVES.find(o => o.id === cfg.oct)!.sub}. Sert à viser chaque octave sur la note déjà accordée.</p>
           <div className="mt-4 flex items-center justify-between gap-2">
-            <p className="text-xs text-[#7d8795]">{nMeas} note{nMeas > 1 ? 's' : ''} mesurée{nMeas > 1 ? 's' : ''} sur ce piano. À effacer en changeant de piano.</p>
-            <button className={chip + ' shrink-0'} onClick={clearMeasures} disabled={!nMeas}>Nouveau piano</button>
+            <p className="text-xs text-[#7d8795]">{nTuned} note{nTuned > 1 ? 's' : ''} accordée{nTuned > 1 ? 's' : ''} en mémoire sur ce piano. À effacer en changeant de piano.</p>
+            <button className={chip + ' shrink-0'} onClick={newPiano} disabled={!nMeas && !nTuned}>Nouveau piano</button>
           </div>
           <p className="mt-4 text-[11px] text-[#3a4450]">Accordeur Pro {VERSION}</p>
         </div>
