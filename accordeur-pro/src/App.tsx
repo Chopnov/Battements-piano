@@ -8,7 +8,7 @@ import {
 } from './tuning/stretch';
 import { constraintsFor, combine, test3m6M, noteLabel, partial, type Tuned, type Constraint } from './tuning/reference';
 
-export const VERSION = '0.5.0-essai';
+export const VERSION = '0.6.0-essai';
 
 /** Notes proposées pour la mesure rapide « médium » : un La par octave de La2 à La6. */
 const QUICK = [45, 57, 69, 81, 93];
@@ -85,7 +85,7 @@ export function App() {
     }
     const newStrike = e.state === 'attack' && (prevState.current !== 'attack' || e.rejected === 'retrigger');
     prevState.current = e.state;
-    if (newStrike) { S.win = []; S.winF = []; S.avg = null; }
+    if (newStrike) { S.win = []; S.winF = []; S.trace = []; S.avg = null; }
     if (e.frame) {
       const f = e.frame, midi = f.note.midi;
       const Bnow = e.fused?.B ?? f.fit.B;
@@ -100,8 +100,10 @@ export function App() {
       if (comb && comb.parts.length > 1 && comb.spread > 1.5) warn.push(`références en désaccord ±${fmt(comb.spread)} ct`);
       if (comb && Math.abs(vCurve - v) > 10) warn.push(`loin de la courbe (${vCurve - v > 0 ? '−' : '+'}${fmt(Math.abs(vCurve - v), 0)} ct)`);
       S.refLabel = [comb ? comb.label : 'courbe', ...warn].join(' · ');
+      const mb = comb?.main.beatHz;
+      S.beat = mb ?? null; S.beatName = mb != null ? comb!.main.label.split(' sur ')[0] : '';
       detail.current = { midi, parts: comb?.parts ?? [], cents: v, curve: vCurve, test: test3m6M(midi, { f0: f.fit.f0, B: Bnow }, tunedRef.current) };
-      if (midi !== S.midi) { S.midi = midi; S.win = []; S.winF = []; S.disp = v; S.ok = false; S.okTime = 0; setCurrent(midi); }
+      if (midi !== S.midi) { S.midi = midi; S.win = []; S.winF = []; S.trace = []; S.disp = v; S.ok = false; S.okTime = 0; setCurrent(midi); }
       if (S.disp == null) S.disp = v;
       S.meas = v; S.frozen = false; S.tol = toleranceFor(midi, la4Ref.current);
       S.win.push([e.time, v]);
@@ -109,6 +111,7 @@ export function App() {
       S.winF.push([e.time, f.fit.f0]);
       while (S.winF.length && e.time - S.winF[0][0] > 0.5) S.winF.shift();
       const vals = S.win.map(x => x[1]), avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+      S.trace.push([e.time, avg]); while (S.trace.length && e.time - S.trace[0][0] > 2) S.trace.shift();
       S.avg = avg; S.sd = Math.sqrt(vals.reduce((a, b) => a + (b - avg) ** 2, 0) / vals.length);
     } else if (e.state === 'silent' || e.state === 'frozen') {
       if (S.midi != null) S.frozen = true;
@@ -207,12 +210,12 @@ export function App() {
         ) : (
           <div className="mb-1 flex items-center gap-3 text-xs">
             {(['accord', 'B'] as const).map(v => (
-              <button key={v} onClick={() => setView(v)} className={'py-1 ' + (view === v ? 'text-[#e8edf3] border-b border-[#74deae]' : 'text-[#7d8795]')}>
+              <button key={v} onClick={() => setView(v)} className={'py-1 whitespace-nowrap ' + (view === v ? 'text-[#e8edf3] border-b border-[#74deae]' : 'text-[#7d8795]')}>
                 {v === 'accord' ? "Courbe d'accord" : 'Inharmonicité'}
               </button>
             ))}
             <span className="ml-auto text-[#7d8795] tabular-nums">
-              {nTuned ? `${nTuned} note${nTuned > 1 ? 's' : ''} accordée${nTuned > 1 ? 's' : ''} en mémoire` : current != null && curDev != null ? `${frLabel(current)} (${current - 20}) visé ${curDev >= 0 ? '+' : '−'}${fmt(Math.abs(curDev))} ct` : 'Commence par le La4'}
+              {nTuned ? `${nTuned} en mémoire` : current != null && curDev != null ? `${frLabel(current)} (${current - 20}) visé ${curDev >= 0 ? '+' : '−'}${fmt(Math.abs(curDev))} ct` : 'Commence par le La4'}
             </span>
           </div>
         )}

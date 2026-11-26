@@ -76,7 +76,7 @@ export function planLabel(p: Plan): string {
 /* ---------- Cible par compromis entre plusieurs intervalles ---------- */
 
 /** Un intervalle avec une note déjà accordée : écart (cents) de la note jouée à ce que demande cet intervalle seul. */
-export interface Constraint { label: string; ref: number; cents: number; weight: number; /** octave, double octave, partition : décide de la cible */ primary?: boolean; /** compté dans le compromis */ used?: boolean }
+export interface Constraint { label: string; ref: number; cents: number; weight: number; /** octave, double octave, partition : décide de la cible */ primary?: boolean; /** compté dans le compromis */ used?: boolean; /** battement de cet intervalle (Hz, signé : + si la note jouée est trop haute) */ beatHz?: number }
 
 interface Kind { d: number; name: string; p: (lo: number) => [number, number]; et: number; w: number }
 // p : partielles qui doivent coïncider (grave, aiguë) ; et : écart voulu en tempérament égal sur ces partielles (cents, note aiguë vs pure)
@@ -101,11 +101,13 @@ export function constraintsFor(midi: number, tuned: Tuned, oct: OctaveType, f0: 
       // double octave à cheval sur deux types d'octave (6:3 puis 4:2) : pas de partielles cohérentes avec les deux, on s'en passe
       if (K.d === 24 && octaveRank(lo, oct) !== octaveRank(lo + 12, oct)) continue;
       const kPlayed = playedIsLo ? pLo : pHi, kRef = playedIsLo ? pHi : pLo;
-      const raw = 1200 * Math.log2(measuredPartial(f0, B, kPlayed, partials) / partial(ref, kRef));
+      const mp = measuredPartial(f0, B, kPlayed, partials), want = playedIsLo ? -K.et : K.et;
+      const raw = 1200 * Math.log2(mp / partial(ref, kRef));
       // note jouée en haut : elle doit être à « et » de la pure ; en bas : à −et
-      const cents = raw - (playedIsLo ? -K.et : K.et);
+      const cents = raw - want;
+      const beatHz = mp - partial(ref, kRef) * Math.pow(2, want / 1200);
       const label = K.name === 'octave' ? `octave ${pLo}:${pHi} sur ${lab(r)}` : `${K.name} sur ${lab(r)}`;
-      out.push({ label, ref: r, cents, weight: K.w * (found(kPlayed) ? 1 : 0.5), primary: K.d === 12 || K.d === 24 });
+      out.push({ label, ref: r, cents, beatHz, weight: K.w * (found(kPlayed) ? 1 : 0.5), primary: K.d === 12 || K.d === 24 });
     }
   }
   // octave de partition : 12 demi-tons égaux entre ses deux extrémités accordées
@@ -118,7 +120,7 @@ export function constraintsFor(midi: number, tuned: Tuned, oct: OctaveType, f0: 
   return out;
 }
 
-export interface Combined { cents: number; spread: number; label: string; parts: Constraint[] }
+export interface Combined { cents: number; spread: number; label: string; parts: Constraint[]; /** intervalle principal et son battement */ main: Constraint }
 
 /**
  * Compromis pondéré. Une référence qui contredit nettement les autres (note qui a bougé) est mise de côté :
@@ -143,7 +145,7 @@ export function combine(cs: Constraint[]): Combined | null {
   const parts = cs.map(c => ({ ...c, used: kept.includes(c) }));
   const main = [...kept].sort((a, b) => b.weight - a.weight)[0];
   const label = main.label + (kept.length > 1 ? ` + ${kept.length - 1} autre${kept.length > 2 ? 's' : ''}` : '');
-  return { cents, spread, label, parts };
+  return { cents, spread, label, parts, main };
 }
 
 /**
