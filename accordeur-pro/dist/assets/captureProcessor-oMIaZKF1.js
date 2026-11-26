@@ -1,1 +1,0 @@
-(function(){let e=2048;var t=class extends AudioWorkletProcessor{buf=new Float32Array(e);n=0;process(t){let n=t[0]?.[0];if(!n)return!0;for(let t=0;t<n.length;t++)if(this.buf[this.n++]=n[t],this.n===e){let t=this.buf;this.port.postMessage({samples:t,sampleRate},[t.buffer]),this.buf=new Float32Array(e),this.n=0}return!0}};registerProcessor(`capture-processor`,t)})();
