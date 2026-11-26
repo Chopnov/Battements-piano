@@ -55,6 +55,7 @@ export class AudioProcessor {
   private hop: number;
   private tracker: NoteTracker | undefined;
   private plan: StrikePlan | undefined;
+  private freeMisses = 0;
   private freeRuns = 0;
   private lastNote: DetectedNote | undefined;
   private ring: Float32Array;
@@ -109,7 +110,7 @@ export class AudioProcessor {
     this.plan = this.tracker.plan();
     if (!this.cfg.adaptiveWindow) return;
     this.size = windowForMidi(this.plan.windowMidi);
-    this.hop = this.size / 8;
+    this.hop = Math.round(this.size / 12);
   }
 
   /** Touche la plus proche de f0 (tempérament égal) et écart en cents. */
@@ -218,7 +219,7 @@ export class AudioProcessor {
 
   private startStrike(): void {
     if (!this.tracker) return;
-    this.tracker.beginStrike(); this.freeRuns = 0;
+    this.tracker.beginStrike(); this.freeRuns = 0; this.freeMisses = 0;
     this.applyPlan();
   }
 
@@ -268,15 +269,23 @@ export class AudioProcessor {
       guided = fitInharmonicityScored(peaks, { ...base, midiHint: plan.center, searchCents: plan.searchCents, minPartials: minFor(midiToFreq(plan.center, this.la4)) });
     }
     let free = null as ReturnType<typeof fitInharmonicityScored> | null;
-    if (plan.runFree && (this.freeRuns < 2 || !guided || 'rejected' in guided)) {
+    if (plan.runFree && (t.cfg.freeFirst || this.freeRuns < 2 || !guided || 'rejected' in guided)) {
       free = fitInharmonicityScored(peaks, base); this.freeRuns++;
     }
     const att = t.observe(guided, free);
+    if (!att && t.cfg.freeFirst && cfg.adaptiveWindow && this.size < 16384 && ++this.freeMisses >= 2) {
+      // rien de reconnu avec une petite fenêtre : peut-être une note grave après l'aigu → grande fenêtre
+      this.size = Math.min(16384, this.size * 2); this.hop = Math.round(this.size / 12); this.freeMisses = 0;
+    }
     if (!att) {
       const r = (guided && 'rejected' in guided ? guided : free && 'rejected' in free ? free : { rejected: 'low-coherence' as const });
       return { reason: r.rejected };
     }
     const fit = att.fit;
+    // note plus grave que prévu (grand saut vers les basses) : on agrandit la fenêtre pour les fenêtres suivantes
+    if (this.cfg.adaptiveWindow && windowForMidi(att.midi) > this.size && windowForMidi(att.midi) <= this.ring.length) {
+      this.size = windowForMidi(att.midi); this.hop = Math.round(this.size / 12);
+    }
     this.lastNote = { midi: att.midi, name: att.name, cents: att.cents, tentative: att.tentative, correction: att.correction };
     // la touche peut varier en cours de frappe : la fusion ne garde que les fenêtres de la touche dominante (voir fuse)
     this.frames.push({ f0: fit.f0, f0c: 0, B: fit.B, sigma: Math.max(0.05, fit.sigmaF0Cents), fund: fit.fundamentalUsed, key: att.midi });
