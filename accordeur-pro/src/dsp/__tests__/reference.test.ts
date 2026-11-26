@@ -64,3 +64,32 @@ describe('accord sur les notes déjà accordées', () => {
     expect(midiToFreq(60)).toBeGreaterThan(0);
   });
 });
+
+import { constraintsFor, combine, test3m6M } from '../../tuning/reference';
+
+describe('cible par compromis entre plusieurs intervalles', () => {
+  const et = (m: number) => 440 * 2 ** ((m - 69) / 12);
+  it('quinte et quarte au tempérament égal (cordes sans inharmonicité) : écart nul dans les deux sens', () => {
+    const tuned: Tuned = { 57: { f0: et(57), B: 0 }, 62: { f0: et(62), B: 0 } };
+    for (const [m, f] of [[64, et(64)], [52, et(52)], [57 + 5, et(62)]] as const) {
+      const t = { ...tuned }; delete t[m];
+      const cs = constraintsFor(m, t, '4:2', f, 0).filter(c => /quinte|quarte/.test(c.label));
+      expect(cs.length).toBeGreaterThan(0);
+      for (const c of cs) expect(Math.abs(c.cents)).toBeLessThan(1e-6);
+    }
+  });
+  it('une référence qui a bougé est mise de côté et signalée par le désaccord', () => {
+    const B = 1e-3, A4 = { f0: 440, B };
+    const fA3 = pureLow(A4, B, 2);
+    const tuned: Tuned = { 69: A4, 81: { f0: pureHigh(A4, B, 2), B }, 64: { f0: et(64) * 2 ** (8 / 1200), B } };
+    const comb = combine(constraintsFor(57, tuned, '4:2', fA3, B))!;
+    expect(Math.abs(comb.cents)).toBeLessThan(0.5);
+    expect(comb.spread).toBeGreaterThan(1.5);
+    expect(comb.label).toMatch(/^octave 4:2 sur La4/);
+  });
+  it('test 3m + 6M : battements égaux quand l’octave est 6:3 pure', () => {
+    const B = 5e-4, hi = { f0: 110, B }, lo = { f0: pureLow(hi, B, 3), B }, mid = { f0: 65.4, B };
+    const r = test3m6M(33, lo, { 36: mid, 45: hi })!;
+    expect(r.m3).toBeCloseTo(r.M6, 6);
+  });
+});

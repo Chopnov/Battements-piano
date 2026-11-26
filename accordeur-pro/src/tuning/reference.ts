@@ -72,3 +72,87 @@ export function planLabel(p: Plan): string {
   if (p.kind === 'partition') return `partition ${lab(p.lo)}–${lab(p.hi)}`;
   return 'courbe';
 }
+
+/* ---------- Cible par compromis entre plusieurs intervalles ---------- */
+
+/** Un intervalle avec une note déjà accordée : écart (cents) de la note jouée à ce que demande cet intervalle seul. */
+export interface Constraint { label: string; ref: number; cents: number; weight: number; /** octave, double octave, partition : décide de la cible */ primary?: boolean; /** compté dans le compromis */ used?: boolean }
+
+interface Kind { d: number; name: string; p: (lo: number) => [number, number]; et: number; w: number }
+// p : partielles qui doivent coïncider (grave, aiguë) ; et : écart voulu en tempérament égal sur ces partielles (cents, note aiguë vs pure)
+const KINDS = (oct: OctaveType): Kind[] => [
+  { d: 12, name: 'octave', p: lo => { const j = octaveRank(lo, oct); return [2 * j, j]; }, et: 0, w: 1 },
+  // double octave et douzième sur les mêmes partielles que les octaves choisies (sinon elles contredisent l'octave : ~8 ct à B = 1e-3)
+  { d: 24, name: 'double octave', p: lo => { const j = octaveRank(lo, oct); return [4 * j, j]; }, et: 0, w: 0.5 },
+  { d: 19, name: 'douzième', p: lo => { const j = octaveRank(lo, oct); return [3 * j, j]; }, et: 0, w: 0.4 },
+  { d: 7, name: 'quinte', p: lo => (lo < 48 ? [6, 4] : [3, 2]), et: -1.955, w: 0.25 },
+  { d: 5, name: 'quarte', p: lo => (lo < 48 ? [8, 6] : [4, 3]), et: 1.955, w: 0.15 },
+];
+
+/** Tous les intervalles utilisables pour viser la touche midi, avec la mesure en cours (f0, B et pics de la fenêtre). */
+export function constraintsFor(midi: number, tuned: Tuned, oct: OctaveType, f0: number, B: number, partials?: PartialMatch[]): Constraint[] {
+  const out: Constraint[] = [];
+  const found = (k: number) => !!partials?.find(x => x.k === k && Math.abs(x.residualCents) < 15);
+  for (const K of KINDS(oct)) {
+    for (const sgn of [1, -1]) {
+      const r = midi + sgn * K.d, ref = tuned[r];
+      if (!ref || r === midi) continue;
+      const lo = Math.min(midi, r), [pLo, pHi] = K.p(lo), playedIsLo = midi === lo;
+      // double octave à cheval sur deux types d'octave (6:3 puis 4:2) : pas de partielles cohérentes avec les deux, on s'en passe
+      if (K.d === 24 && octaveRank(lo, oct) !== octaveRank(lo + 12, oct)) continue;
+      const kPlayed = playedIsLo ? pLo : pHi, kRef = playedIsLo ? pHi : pLo;
+      const raw = 1200 * Math.log2(measuredPartial(f0, B, kPlayed, partials) / partial(ref, kRef));
+      // note jouée en haut : elle doit être à « et » de la pure ; en bas : à −et
+      const cents = raw - (playedIsLo ? -K.et : K.et);
+      const label = K.name === 'octave' ? `octave ${pLo}:${pHi} sur ${lab(r)}` : `${K.name} sur ${lab(r)}`;
+      out.push({ label, ref: r, cents, weight: K.w * (found(kPlayed) ? 1 : 0.5), primary: K.d === 12 || K.d === 24 });
+    }
+  }
+  // octave de partition : 12 demi-tons égaux entre ses deux extrémités accordées
+  for (let lo = midi - 11; lo < midi; lo++) {
+    if (!tuned[lo] || !tuned[lo + 12]) continue;
+    const a = partial(tuned[lo], 1), b = partial(tuned[lo + 12], 1), tgt = a * Math.pow(b / a, (midi - lo) / 12);
+    out.push({ label: `partition ${lab(lo)}–${lab(lo + 12)}`, ref: lo, cents: 1200 * Math.log2((f0 * Math.sqrt(1 + B)) / tgt), weight: 1, primary: true });
+    break;
+  }
+  return out;
+}
+
+export interface Combined { cents: number; spread: number; label: string; parts: Constraint[] }
+
+/**
+ * Compromis pondéré. Une référence qui contredit nettement les autres (note qui a bougé) est mise de côté :
+ * on retire les contraintes à plus de 3 ct de la médiane pondérée. Les intervalles non retenus restent affichés comme contrôle.
+ */
+export function combine(cs: Constraint[]): Combined | null {
+  if (!cs.length) return null;
+  // Les octaves (et doubles octaves, octave de partition) décident. Quintes, quartes et douzièmes ne comptent que s'il n'y a
+  // aucune octave accordée : sur cordes inharmoniques elles tirent les octaves de plusieurs cents (accord simulé : 0,5 → 2 ct).
+  const pool = cs.some(c => c.primary) ? cs.filter(c => c.primary) : cs;
+  const wmed = (a: Constraint[]) => {
+    const s = [...a].sort((x, y) => x.cents - y.cents), tot = s.reduce((t, c) => t + c.weight, 0);
+    let acc = 0; for (const c of s) { acc += c.weight; if (acc >= tot / 2) return c.cents; }
+    return s[s.length - 1].cents;
+  };
+  const med = wmed(pool);
+  let kept = pool.filter(c => Math.abs(c.cents - med) <= 3);
+  if (!kept.length) kept = pool;
+  const W = kept.reduce((t, c) => t + c.weight, 0);
+  const cents = kept.reduce((t, c) => t + c.weight * c.cents, 0) / W;
+  const spread = Math.sqrt(pool.reduce((t, c) => t + c.weight * (c.cents - cents) ** 2, 0) / pool.reduce((t, c) => t + c.weight, 0));
+  const parts = cs.map(c => ({ ...c, used: kept.includes(c) }));
+  const main = [...kept].sort((a, b) => b.weight - a.weight)[0];
+  const label = main.label + (kept.length > 1 ? ` + ${kept.length - 1} autre${kept.length > 2 ? 's' : ''}` : '');
+  return { cents, spread, label, parts };
+}
+
+/**
+ * Test tierce mineure + sixte majeure de l'octave lo–lo+12 (la note du milieu est lo+3) : battements (b/s)
+ * de la tierce (partielles 6 de lo et 5 du milieu) et de la sixte (5 du milieu et 3 de l'aiguë). Égaux = octave 6:3 pure.
+ */
+export function test3m6M(lo: number, loNote: TunedNote, tuned: Tuned): { mid: number; hi: number; m3: number; M6: number } | null {
+  const mid = tuned[lo + 3], hi = tuned[lo + 12];
+  if (!mid || !hi) return null;
+  return { mid: lo + 3, hi: lo + 12, m3: Math.abs(partial(loNote, 6) - partial(mid, 5)), M6: Math.abs(partial(mid, 5) - partial(hi, 3)) };
+}
+export const noteLabel = lab;

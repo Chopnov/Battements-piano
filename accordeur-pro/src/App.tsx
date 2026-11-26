@@ -6,9 +6,9 @@ import {
   PROFILES, OCTAVES, profileB, refinedB, stretchCurve, toleranceFor, frLabel, medianB, isOutlier,
   type Measures, type OctaveType,
 } from './tuning/stretch';
-import { planFor, centsFromPlan, planLabel, partial, type Tuned } from './tuning/reference';
+import { constraintsFor, combine, test3m6M, noteLabel, partial, type Tuned, type Constraint } from './tuning/reference';
 
-export const VERSION = '0.4.0-essai';
+export const VERSION = '0.5.0-essai';
 
 /** Notes proposées pour la mesure rapide « médium » : un La par octave de La2 à La6. */
 const QUICK = [45, 57, 69, 81, 93];
@@ -25,6 +25,8 @@ function load(): Saved {
     return { ...DEFAULTS, ...s };
   } catch { return DEFAULTS; }
 }
+
+interface Detail { midi: number; parts: Constraint[]; cents: number; curve: number; test: ReturnType<typeof test3m6M> }
 
 const fmt = (v: number, d = 1) => v.toFixed(d).replace('.', ',');
 const pill = 'rounded-full border border-[#222a34] bg-[#12161c] px-3 py-1.5 text-[13px] font-medium whitespace-nowrap active:bg-[#1a2029]';
@@ -63,6 +65,8 @@ export function App() {
   const la4Ref = useRef(cfg.la4); la4Ref.current = cfg.la4;
   const tunedRef = useRef(cfg.tuned); tunedRef.current = cfg.tuned;
   const octRef = useRef(cfg.oct); octRef.current = cfg.oct;
+  const detail = useRef<Detail | null>(null);
+  const [showDetail, setShowDetail] = useState(false);
 
   function onEvent(e: ProcessorEvent) {
     const S = live.current;
@@ -84,13 +88,19 @@ export function App() {
     if (newStrike) { S.win = []; S.winF = []; S.avg = null; }
     if (e.frame) {
       const f = e.frame, midi = f.note.midi;
-      const plan = planFor(midi, tunedRef.current, octRef.current);
-      const fromRef = centsFromPlan(plan, midi, tunedRef.current, f.fit.f0, e.fused?.B ?? f.fit.B, f.fit.partials);
-      const v = fromRef ?? f.note.cents - target.current(midi);
-      // note déjà accordée rejouée : écart à sa valeur en mémoire (a-t-elle bougé ?)
-      const mem = tunedRef.current[midi];
+      const Bnow = e.fused?.B ?? f.fit.B;
+      const comb = combine(constraintsFor(midi, tunedRef.current, octRef.current, f.fit.f0, Bnow, f.fit.partials));
+      const vCurve = f.note.cents - target.current(midi);
+      const v = comb ? comb.cents : vCurve;
+      // garde-fous : note déjà accordée qui a bougé, références qui se contredisent, cible loin de la courbe
+      const mem = tunedRef.current[midi], tol = toleranceFor(midi, la4Ref.current);
       const drift = mem ? 1200 * Math.log2(f.fit.f0 / mem.f0) : 0;
-      S.refLabel = planLabel(plan) + (mem && Math.abs(drift) > toleranceFor(midi, la4Ref.current) ? ` · a bougé de ${drift > 0 ? '+' : '−'}${fmt(Math.abs(drift))} ct` : '');
+      const warn: string[] = [];
+      if (mem && Math.abs(drift) > tol) warn.push(`a bougé de ${drift > 0 ? '+' : '−'}${fmt(Math.abs(drift))} ct`);
+      if (comb && comb.parts.length > 1 && comb.spread > 1.5) warn.push(`références en désaccord ±${fmt(comb.spread)} ct`);
+      if (comb && Math.abs(vCurve - v) > 10) warn.push(`loin de la courbe (${vCurve - v > 0 ? '−' : '+'}${fmt(Math.abs(vCurve - v), 0)} ct)`);
+      S.refLabel = [comb ? comb.label : 'courbe', ...warn].join(' · ');
+      detail.current = { midi, parts: comb?.parts ?? [], cents: v, curve: vCurve, test: test3m6M(midi, { f0: f.fit.f0, B: Bnow }, tunedRef.current) };
       if (midi !== S.midi) { S.midi = midi; S.win = []; S.winF = []; S.disp = v; S.ok = false; S.okTime = 0; setCurrent(midi); }
       if (S.disp == null) S.disp = v;
       S.meas = v; S.frozen = false; S.tol = toleranceFor(midi, la4Ref.current);
@@ -163,11 +173,11 @@ export function App() {
         </button>
       </header>
 
-      <section className="relative min-h-[240px] flex-[1.25]">
+      <section className="relative min-h-[240px] flex-[1.25]" onClick={() => running && setShowDetail(d => !d)}>
         <Strobe live={live} />
         {current != null && <>
-          <button aria-label="Demi-ton plus bas" onClick={() => nudge(-1)} className="absolute left-2 top-[14%] h-16 w-14 text-3xl text-[#3a4450] active:text-[#e8edf3]">‹</button>
-          <button aria-label="Demi-ton plus haut" onClick={() => nudge(1)} className="absolute right-2 top-[14%] h-16 w-14 text-3xl text-[#3a4450] active:text-[#e8edf3]">›</button>
+          <button aria-label="Demi-ton plus bas" onClick={ev => { ev.stopPropagation(); nudge(-1); }} className="absolute left-2 top-[14%] h-16 w-14 text-3xl text-[#3a4450] active:text-[#e8edf3]">‹</button>
+          <button aria-label="Demi-ton plus haut" onClick={ev => { ev.stopPropagation(); nudge(1); }} className="absolute right-2 top-[14%] h-16 w-14 text-3xl text-[#3a4450] active:text-[#e8edf3]">›</button>
         </>}
         {!running && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-[#0b0e12]/85 px-6 text-center">
@@ -179,7 +189,7 @@ export function App() {
       </section>
 
       <section className="flex-1 px-4 pb-3">
-        {measuring ? (
+        {showDetail && !measuring ? <DetailPanel detail={detail} onClose={() => setShowDetail(false)} /> : measuring ? (
           <div className="mb-2">
             <p className="text-sm">Joue chaque note proposée <b>2 fois</b>, forte, laisse sonner 2 s. {doneQuick}/{QUICK.length}</p>
             <div className="mt-2 flex flex-wrap gap-1.5">
@@ -206,8 +216,8 @@ export function App() {
             </span>
           </div>
         )}
-        <Curve view={measuring ? 'B' : view} dev={dev.map(d => d + cfg.offset)} B={B} profileB={Bp} profile={profile} meas={cfg.meas} tunedDev={tunedDev}
-          current={current} suggested={measuring ? QUICK : []} />
+        {!(showDetail && !measuring) && <Curve view={measuring ? 'B' : view} dev={dev.map(d => d + cfg.offset)} B={B} profileB={Bp} profile={profile} meas={cfg.meas} tunedDev={tunedDev}
+          current={current} suggested={measuring ? QUICK : []} />}
         {measuring && (
           <div className="mt-2 flex gap-2">
             <button className={chip} onClick={() => setMeasuring(false)}>Terminé</button>
@@ -269,5 +279,34 @@ export function App() {
         </div>
       )}
     </main>
+  );
+}
+
+/** Détail de la cible (touche le stroboscope) : chaque intervalle avec une note accordée, son écart et son poids. */
+function DetailPanel({ detail, onClose }: { detail: React.RefObject<Detail | null>; onClose: () => void }) {
+  const [d, setD] = useState<Detail | null>(detail.current);
+  useEffect(() => { const id = setInterval(() => setD(detail.current ? { ...detail.current } : null), 250); return () => clearInterval(id); }, [detail]);
+  const sgn = (v: number) => (v >= 0 ? '+' : '−') + fmt(Math.abs(v)) + ' ct';
+  return (
+    <div className="text-sm" onClick={onClose}>
+      <p className="mb-2 text-xs text-[#7d8795]">Chaque ligne : où en est la note pour cet intervalle seul. Les octaves décident (compromis pondéré) ; quintes, quartes et douzièmes servent de contrôle. Touche pour fermer.</p>
+      {!d ? <p className="text-[#7d8795]">Joue une note.</p> : <>
+        <div className="flex justify-between border-b border-[#222a34] pb-1 font-semibold"><span>{noteLabel(d.midi)} ({d.midi - 20}) · compromis</span><span className="tabular-nums">{sgn(d.cents)}</span></div>
+        {d.parts.length === 0 && <p className="py-1 text-[#7d8795]">Aucune note accordée à l'octave, la quinte, la quarte, la douzième ou la double octave : la courbe sert de repère.</p>}
+        {[...d.parts].sort((a, b) => b.weight - a.weight).map((c, i) => (
+          <div key={i} className="flex justify-between py-0.5 tabular-nums">
+            <span className={c.used ? 'text-[#c3cad3]' : 'text-[#7d8795]'}>{c.label} <span className="text-[#3a4450]">{c.used ? '×' + fmt(c.weight, 2) : 'contrôle'}</span></span>
+            <span className={Math.abs(c.cents - d.cents) > 3 ? 'text-[#ef8b5b]' : ''}>{sgn(c.cents)}</span>
+          </div>
+        ))}
+        <div className="flex justify-between py-0.5 text-[#7d8795] tabular-nums"><span>courbe (repère)</span><span>{sgn(d.curve)}</span></div>
+        {d.test && (
+          <div className="mt-2 rounded-lg bg-[#12161c] p-2">
+            <p className="text-xs text-[#7d8795]">Test 3m + 6M · {noteLabel(d.midi)}–{noteLabel(d.test.mid)} et {noteLabel(d.test.mid)}–{noteLabel(d.test.hi)}</p>
+            <p className="tabular-nums">3m {fmt(d.test.m3)} b/s · 6M {fmt(d.test.M6)} b/s</p>
+          </div>
+        )}
+      </>}
+    </div>
   );
 }
